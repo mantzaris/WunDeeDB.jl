@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        julia-version: ["lts"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+
+      - name: Install Dependencies
+        run: |
+          julia --project -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Run Tests
+        run: |
+          julia --project -e 'using Pkg; Pkg.test()'

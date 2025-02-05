@@ -1,0 +1,41 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main # Update to match your default branch name
+    tags: "*"
+  pull_request:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+      pages: write
+      actions: write
+      statuses: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "lts" # Specify the Julia version you are using
+      - uses: julia-actions/cache@v2
+      - name: Install dependencies
+        run: |
+          julia --project=docs/ -e '
+            using Pkg;
+            Pkg.develop(PackageSpec(path=pwd()));
+            Pkg.instantiate()
+          '
+      - name: Build and deploy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: julia --project=docs/ docs/make.jl
+      - name: Run doctests
+        shell: julia --project=docs --color=yes {0}
+        run: |
+          using Documenter: DocMeta, doctest
+          using WunDeeDB
+          DocMeta.setdocmeta!(WunDeeDB, :DocTestSetup, :(using WunDeeDB); recursive=true)
+          doctest(WunDeeDB)
