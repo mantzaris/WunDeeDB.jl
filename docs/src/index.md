@@ -15,7 +15,7 @@ Documentation for [WunDeeDB](https://github.com/mantzaris/WunDeeDB.jl).
 ```
 
 ```@autodocs
-Modules = [BenchmarkDataNLP]
+Modules = [WunDeeDB]
 Private = false
 Order = [:function]
 ```

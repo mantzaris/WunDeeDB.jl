@@ -1,0 +1,16 @@
+] activate .
+] dev .
+using Pkg
+Pkg.add("Revise")
+using Revise
+using WundDeeDB
+
+
+# for the docs
+.../repos/WundDeeDB.jl$ julia --project=. -e 'using Pkg; Pkg.resolve(); Pkg.instantiate()'
+  No Changes to `~/Documents/repos/WundDeeDB.jl/Project.toml`
+  No Changes to `~/Documents/repos/WundDeeDB.jl/Manifest.toml`
+.../repos/WundDeeDB.jl$ julia --project=. docs/make.jl
+
+# or for the docs 
+julia --project=docs/ docs/make.jl
