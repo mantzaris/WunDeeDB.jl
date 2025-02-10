@@ -4,7 +4,7 @@ using Pkg
 Pkg.add("Revise")
 using Revise
 using WundDeeDB
-
+] test
 
 # for the docs
 .../repos/WundDeeDB.jl$ julia --project=. -e 'using Pkg; Pkg.resolve(); Pkg.instantiate()'
