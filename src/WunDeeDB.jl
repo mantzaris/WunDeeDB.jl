@@ -2,7 +2,7 @@ module WunDeeDB
 
 using SQLite, JSON3
 
-export initialize_db, insert_embedding, new_add
+export initialize_db, insert_embedding, delete_embedding, update_embedding, get_embedding, new_add
 
 """
 This function adds two numbers.
@@ -68,7 +68,7 @@ function initialize_db(db_path::String, collection_name::String)
         create_main_stmt = """
         CREATE TABLE IF NOT EXISTS $collection_name (
             id_text TEXT PRIMARY KEY,
-            embedding_blob BLOB NOT NULL,
+            embedding_json TEXT NOT NULL,
             data_type TEXT
         )
         """
@@ -92,14 +92,15 @@ function initialize_db(db_path::String, collection_name::String)
 end
 
 
-function to_blob(vec::AbstractVector{<:Number})    
-    return Vector{UInt8}(reinterpret(UInt8, vec))
+function to_json_embedding(vec::AbstractVector{<:Number})
+    return JSON3.write(vec)
 end
 
-function infer_data_type(embedding::AbstractVector{<:Number})
+function infer_data_type(embedding::AbstractVector{<:Number}) 
     elty = eltype(embedding)
-    return string(elty)
+    return string(elty) 
 end
+
 
 
 function update_meta(db::SQLite.DB, collection_name::String, embedding_length::Int)
@@ -134,54 +135,55 @@ function update_meta(db::SQLite.DB, collection_name::String, embedding_length::I
     end
 end
 
-function insert_embedding(db::SQLite.DB,
-    collection_name::String,
-    id_text,
-    embedding::AbstractVector{<:Number};
+function insert_embedding(db::SQLite.DB, 
+    collection_name::String, 
+    id_text, 
+    embedding::AbstractVector{<:Number}; 
     data_type::Union{Nothing,String}=nothing)
 
     if data_type === nothing
         data_type = infer_data_type(embedding)
     end
-
-    emb_blob = to_blob(embedding)
-
+    
+    emb_json = to_json_embedding(embedding)
+    
     stmt = """
-    INSERT INTO $collection_name (id_text, embedding_blob, data_type)
+    INSERT INTO $collection_name (id_text, embedding_json, data_type)
     VALUES (?, ?, ?)
     """
-    SQLite.execute(db, stmt, (string(id_text), emb_blob, data_type))
-
-    return "true"
+    SQLite.execute(db, stmt, (string(id_text), emb_json, data_type))
+    
+    return "true"    
 end
 
-function insert_embedding(db_path::String,
-    collection_name::String,
-    id_text,
-    embedding::AbstractVector{<:Number};
-    data_type::Union{Nothing,String}=nothing)
-
-    db = open_db(db_path)
-    try
-        msg = insert_embedding(db, collection_name, id_text, embedding; data_type=data_type)
-        update_meta(db, "$(collection_name)_meta", length(embedding) )
-
-        close_db(db)
-        return msg
-    catch e
-        close_db(db)
-        "Error: $(e)"
-    end
+function insert_embedding(db_path::String, 
+    collection_name::String, 
+    id_text, 
+    embedding::AbstractVector{<:Number}; 
+    data_type::Union{Nothing,String}=nothing) 
+    
+    db = open_db(db_path) 
+    
+    try 
+        msg = insert_embedding(db, collection_name, id_text, embedding; data_type=data_type) 
+        update_meta(db, "$(collection_name)_meta", length(embedding)) 
+        close_db(db) 
+        return msg 
+    catch e 
+        close_db(db) 
+        return "Error: $(e)" 
+    end 
 end
+
 
 
 
 #DELETE
-function update_meta_delete(db::SQLite.DB, meta_table::String)
-    q_str = "SELECT row_num, vector_length FROM $meta_table"
-    rows = collect(SQLite.execute(db, q_str))
-    if isempty(rows)
-        return
+function update_meta_delete(db::SQLite.DB, meta_table::String) 
+    q_str = "SELECT row_num, vector_length FROM $meta_table" 
+    rows = collect(SQLite.execute(db, q_str)) 
+    if isempty(rows) 
+        return 
     end
 
     row = rows[1]
@@ -197,7 +199,9 @@ function update_meta_delete(db::SQLite.DB, meta_table::String)
         update_str = "UPDATE $meta_table SET row_num = ?"
         SQLite.execute(db, update_str, new_row_num)
     end
+
 end
+
 
 function delete_embedding(db::SQLite.DB, collection_name::String, id_text)
     check_sql = """
@@ -236,10 +240,10 @@ end
 
 
 #UPDATE
-function update_embedding(db::SQLite.DB,
-    collection_name::String,
-    id_text,
-    new_embedding::AbstractVector{<:Number};
+function update_embedding(db::SQLite.DB, 
+    collection_name::String, 
+    id_text, 
+    new_embedding::AbstractVector{<:Number}; 
     data_type::Union{Nothing,String}=nothing)
 
     check_sql = """
@@ -249,43 +253,43 @@ function update_embedding(db::SQLite.DB,
     if isempty(rows_found)
         return "notfound"
     end
-
+    
     meta_table = "$(collection_name)_meta"
     meta_sql = "SELECT vector_length FROM $meta_table"
     meta_rows = collect(SQLite.execute(db, meta_sql))
     if isempty(meta_rows)
-        # no meta row => either error or allow any dimension
         throw("No metadata found in $meta_table; can't validate dimension.")
     end
-
+    
     stored_length = meta_rows[1].vector_length
     new_length = length(new_embedding)
     if stored_length != new_length
         throw("Vector length mismatch: stored=$stored_length, new=$new_length")
     end
-
-    emb_blob = to_blob(new_embedding)
-
+    
+    emb_json = to_json_embedding(new_embedding)
+    
     if data_type === nothing
         data_type = infer_data_type(new_embedding)
     end
-
+    
     update_sql = """
     UPDATE $collection_name
-    SET embedding_blob = ?, data_type = ?
+    SET embedding_json = ?, data_type = ?
     WHERE id_text = ?
     """
-    SQLite.execute(db, update_sql, (emb_blob, data_type, string(id_text)))
-
+    SQLite.execute(db, update_sql, (emb_json, data_type, string(id_text)))
+    
     return "true"
 end
+
 
 function update_embedding(db_path::String,
     collection_name::String,
     id_text,
     new_embedding::AbstractVector{<:Number};
     data_type::Union{Nothing,String}=nothing)
-
+    
     db = open_db(db_path)
     try
         msg = update_embedding(db, collection_name, id_text, new_embedding; data_type=data_type)
@@ -294,38 +298,37 @@ function update_embedding(db_path::String,
     catch e
         close_db(db)
         return "Error: $(e)"
-    end
+    end 
 end
 
 
 #RETRIEVE
-function parse_data_type(dt::String)
-    T = get(DATA_TYPE_MAP, dt, nothing)
-    if T === nothing
-        error("Unsupported data type: $dt")
-    end
-    return T
+function parse_data_type(dt::String) 
+    T = get(DATA_TYPE_MAP, dt, nothing) 
+    if T === nothing 
+        error("Unsupported data type: $dt") 
+    end 
+    
+    return T 
 end
 
-function get_embedding(db::SQLite.DB, collection_name::String, id_text)
-    sql = """
-    SELECT embedding_blob, data_type
-    FROM $collection_name
-    WHERE id_text = ?
-    """
-    rows = collect(SQLite.execute(db, sql, (string(id_text),)))
-    if isempty(rows)
-        return nothing
+function get_embedding(db::SQLite.DB, collection_name::String, id_text) 
+    sql = """ 
+    SELECT embedding_json, data_type 
+    FROM $collection_name 
+    WHERE id_text = ? 
+    """ 
+    rows = collect(SQLite.execute(db, sql, (string(id_text),))) 
+    if isempty(rows) 
+        return nothing 
     end
 
     row = rows[1]
-    raw_bytes = row.embedding_blob  #an embedding stored as a 'Vector{UInt8}'
-    dt_string = row.data_type       #data_type for it can be eg "Float32" or "Float64"
+    raw_json = row.embedding_json
+    dt_string = row.data_type
 
-    T = parse_data_type(dt_string)  #get the type from the string label
-
-    emb_reinterpreted = reinterpret(T, raw_bytes)
-    embedding_vec = collect(emb_reinterpreted)
+    T = parse_data_type(dt_string)
+    embedding_vec = JSON3.read(raw_json, Vector{T})
 
     return embedding_vec
 end
@@ -335,10 +338,9 @@ function get_embedding(db_path::String, collection_name::String, id_text)
     try
         vec = get_embedding(db, collection_name, id_text)
         close_db(db)
-        return vec  # either nothing or a Vector{T}
+        return vec
     catch e
         close_db(db)
-        # Return an error string, or rethrow
         return "Error: $(e)"
     end
 end
