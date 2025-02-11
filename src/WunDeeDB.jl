@@ -16,83 +16,138 @@ function new_add(a, b)
 end
 
 
-# TODO: add transactions
 
-#Initialize (or open) the database file at `db_path`. If the file's directory does not exist, return a warning message.
-#Ensures a table named `collection_name` exists with:'id TEXT PRIMARY KEY','embedding BLOB NOT NULL'
-#Also creates a metadata table named `collection_name_meta` to store the vector length, unless it already exists.
-#Returns: A `String` indicating success or a warning message if the directory doesn't exist
-function initialize_db(db_path::String, collection_name::String, vector_length::Int)
+function open_db(db_path::String)
     dirpath = Base.dirname(db_path)
-
+    
     if !isdir(dirpath)
         try
             mkpath(dirpath)
         catch e
-            return "ERROR: Could not create directory $dirpath. Original error: $(e)"
+            error("ERROR: Could not create directory $dirpath. Original error: $(e)")
         end
     end
+    return SQLite.DB(db_path)
+end
 
-    db = SQLite.DB(db_path)
+function close_db(db::SQLite.DB)
+    SQLite.close(db)
+end
+
+
+function initialize_db(db_path::String, collection_name::String)
+    db = open_db(db_path)
+
     try
-        create_stmt = """
+        #main embeddings table
+        create_main_stmt = """
         CREATE TABLE IF NOT EXISTS $collection_name (
-            id TEXT PRIMARY KEY,
-            embedding BLOB NOT NULL
+            id_text TEXT PRIMARY KEY,
+            embedding_blob BLOB NOT NULL,
+            data_type TEXT
         )
         """
-        SQLite.execute(db, create_stmt)
+        SQLite.execute(db, create_main_stmt)
 
-        # TODO: now make it that it stores the embedding type
+        #meta table
         meta_stmt = """
-        CREATE TABLE IF NOT EXISTS ${collection_name}_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
+        CREATE TABLE IF NOT EXISTS $(collection_name)_meta (
+            row_num BIGINT,
+            vector_length INT
         )
         """
         SQLite.execute(db, meta_stmt)
 
-        insert_meta_stmt = """
-        INSERT OR IGNORE INTO ${collection_name}_meta (key, value)
-        VALUES ('vector_length', ?)
-        """
-        SQLite.execute(db, insert_meta_stmt, string(vector_length))
-
-        # 6. Close DB and return success
-        SQLite.close(db)
-        return "Database initialized successfully at '$db_path' with table '$collection_name'."
+        close_db(db)
+        return "true"
     catch e
-        SQLite.close(db)
-        rethrow(e)
+        close_db(db)
+        return "Error: $(e)"
     end
 end
 
 
-#Create
-function insert_embedding(db_path::String,
-                            collection_name::String,
-                            id,
-                            embedding::AbstractVector{<:Number})
-    db = SQLite.DB(db_path)
-    try
-
-        emb_blob = to_blob(embedding)
-
-        stmt = "INSERT INTO $collection_name (id, embedding) VALUES (?, ?)"
-        SQLite.execute(db, stmt, (string(id), emb_blob))
-
-        SQLite.close(db)
-        return "Embedding inserted successfully for id = $(string(id))."
-        catch e
-        SQLite.close(db)
-        rethrow(e)
-    end
-end
-
-function to_blob(vec::AbstractVector{<:Number})
-    
+function to_blob(vec::AbstractVector{<:Number})    
     return Vector{UInt8}(reinterpret(UInt8, vec))
 end
+
+function infer_data_type(embedding::AbstractVector{<:Number})
+    elty = eltype(embedding)
+    return string(elty)
+end
+
+function insert_embedding(db::SQLite.DB,
+    collection_name::String,
+    id_text,
+    embedding::AbstractVector{<:Number};
+    data_type::Union{Nothing,String}=nothing)
+
+    if data_type === nothing
+        data_type = infer_data_type(embedding)
+    end
+
+    emb_blob = to_blob(embedding)
+
+    stmt = """
+    INSERT INTO $collection_name (id_text, embedding_blob, data_type)
+    VALUES (?, ?, ?)
+    """
+    SQLite.execute(db, stmt, (string(id_text), emb_blob, data_type))
+
+    return "true"
+end
+
+function insert_embedding(db_path::String,
+    collection_name::String,
+    id_text,
+    embedding::AbstractVector{<:Number};
+    data_type::Union{Nothing,String}=nothing)
+
+    db = open_db(db_path)
+    try
+        msg = insert_embedding(db, collection_name, id_text, embedding; data_type=data_type)
+        update_meta(db, "$(collection_name)_meta", length(embedding) )
+
+        close_db(db)
+        return msg
+    catch e
+        close_db(db)
+        "Error: $(e)"
+    end
+end
+
+function update_meta(db::SQLite.DB, collection_name::String, embedding_length::Int)
+    q_str = "SELECT row_num, vector_length FROM $(collection_name)_meta"
+    
+    result_iterator = SQLite.execute(db, q_str)
+    rows = collect(result_iterator)
+
+    if isempty(rows) #if no rows we set row_num=1, vector_length=embedding_length
+        insert_str = """
+        INSERT INTO $(collection_name)_meta (row_num, vector_length)
+        VALUES (?, ?)
+        """
+        SQLite.execute(db, insert_str, (1, embedding_length))
+    else #there is at least one row; we'll consider only the first
+        row = rows[1]
+        old_row_num = row.row_num
+        old_vec_len = row.vector_length
+
+        new_row_num = old_row_num + 1
+
+        #check dimension consistency
+        if old_vec_len != embedding_length
+            throw("Vector length mismatch: existing=$old_vec_len, new=$embedding_length.")
+        end
+
+        update_str = """
+        UPDATE $(collection_name)_meta
+        SET row_num = ?
+        """
+        SQLite.execute(db, update_str, new_row_num)
+    end
+end
+
 
 #Delete
 #TODO remove collection
@@ -104,7 +159,7 @@ end
 function get_embedding(db_path::String, collection_name::String, id)
     db = SQLite.DB(db_path)
     try
-        q = SQLite.Query(db, "SELECT embedding FROM $collection_name WHERE id = ?", string(id))
+        q = SQLite.execute(db, "SELECT embedding FROM $collection_name WHERE id = ?", string(id))
         rows = collect(q)
         SQLite.close(db)
         if length(rows) == 0
