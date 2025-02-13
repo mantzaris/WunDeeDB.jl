@@ -1,8 +1,13 @@
-module WunDeeDB
+module WunDeeD
 
 using SQLite, JSON3
 
-export initialize_db, insert_embedding, delete_embedding, update_embedding, get_embedding, new_add
+export initialize_db, 
+        insert_embedding, bulk_insert_embedding, 
+        delete_embedding, bulk_delete_embedding, 
+        update_embedding, bulk_update_embedding,
+        get_embedding, bulk_get_embedding,
+        new_add
 
 """
 This function adds two numbers.
@@ -21,7 +26,15 @@ end
 #transactions and atomicity, SQLite.transaction(db) do...
 #linear exact search for Retrieval
 #make CRUD SQL statements constants global
+#journaling?...(PRAGMA journal_mode=WAL;)
+#bulk inserts, deletes, retrievals, updates
+#random look up? single or batch?
+#'next' embedding(s)?
+#count function?
+#get embedding size function?
 ###################
+
+const BULK_LIMIT = 1000
 
 const DATA_TYPE_MAP = Dict(
     "Float16"  => Float16,
@@ -41,7 +54,7 @@ const DATA_TYPE_MAP = Dict(
 )
 
 
-
+# DB connection fns 
 function open_db(db_path::String)
     dirpath = Base.dirname(db_path)
     
@@ -60,6 +73,7 @@ function close_db(db::SQLite.DB)
 end
 
 
+# Initialization 
 function initialize_db(db_path::String, collection_name::String)
     db = open_db(db_path)
 
@@ -92,6 +106,8 @@ function initialize_db(db_path::String, collection_name::String)
 end
 
 
+
+# Serialization Helpers
 function to_json_embedding(vec::AbstractVector{<:Number})
     return JSON3.write(vec)
 end
@@ -103,79 +119,51 @@ end
 
 
 
-function update_meta(db::SQLite.DB, collection_name::String, embedding_length::Int)
-    q_str = "SELECT row_num, vector_length FROM $(collection_name)_meta"
-    
-    result_iterator = SQLite.execute(db, q_str)
-    rows = collect(result_iterator)
-
-    if isempty(rows) #if no rows we set row_num=1, vector_length=embedding_length
-        insert_str = """
-        INSERT INTO $(collection_name)_meta (row_num, vector_length)
+# Meta Table Helpers
+function update_meta(db::SQLite.DB, meta_table::String, embedding_length::Int)
+    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
+    rows = collect(SQLite.execute(db, q_str))
+    if isempty(rows)
+        stmt = """
+        INSERT INTO $(meta_table) (row_num, vector_length)
         VALUES (?, ?)
         """
-        SQLite.execute(db, insert_str, (1, embedding_length))
-    else #there is at least one row; we'll consider only the first
+        SQLite.execute(db, stmt, (1, embedding_length))
+    else
         row = rows[1]
         old_row_num = row.row_num
         old_vec_len = row.vector_length
-
         new_row_num = old_row_num + 1
-
-        #check dimension consistency
         if old_vec_len != embedding_length
             throw("Vector length mismatch: existing=$old_vec_len, new=$embedding_length.")
         end
+        stmt = "UPDATE $(meta_table) SET row_num = ?"
+        SQLite.execute(db, stmt, new_row_num)
+    end
+end
 
-        update_str = """
-        UPDATE $(collection_name)_meta
-        SET row_num = ?
+# Bulk version: add `count` rows
+function update_meta_bulk(db::SQLite.DB, meta_table::String, embedding_length::Int, count::Int)
+    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
+    rows = collect(SQLite.execute(db, q_str))
+    if isempty(rows)
+        stmt = """
+        INSERT INTO $(meta_table) (row_num, vector_length)
+        VALUES (?, ?)
         """
-        SQLite.execute(db, update_str, new_row_num)
+        SQLite.execute(db, stmt, (count, embedding_length))
+    else
+        row = rows[1]
+        old_row_num = row.row_num
+        old_vec_len = row.vector_length
+        if old_vec_len != embedding_length
+            throw("Vector length mismatch in meta: existing=$old_vec_len, new=$embedding_length")
+        end
+        new_row_num = old_row_num + count
+        stmt = "UPDATE $(meta_table) SET row_num = ?"
+        SQLite.execute(db, stmt, new_row_num)
     end
 end
-
-function insert_embedding(db::SQLite.DB, 
-    collection_name::String, 
-    id_text, 
-    embedding::AbstractVector{<:Number}; 
-    data_type::Union{Nothing,String}=nothing)
-
-    if data_type === nothing
-        data_type = infer_data_type(embedding)
-    end
-    
-    emb_json = to_json_embedding(embedding)
-    
-    stmt = """
-    INSERT INTO $collection_name (id_text, embedding_json, data_type)
-    VALUES (?, ?, ?)
-    """
-    SQLite.execute(db, stmt, (string(id_text), emb_json, data_type))
-    
-    return "true"    
-end
-
-function insert_embedding(db_path::String, 
-    collection_name::String, 
-    id_text, 
-    embedding::AbstractVector{<:Number}; 
-    data_type::Union{Nothing,String}=nothing) 
-    
-    db = open_db(db_path) 
-    
-    try 
-        msg = insert_embedding(db, collection_name, id_text, embedding; data_type=data_type) 
-        update_meta(db, "$(collection_name)_meta", length(embedding)) 
-        close_db(db) 
-        return msg 
-    catch e 
-        close_db(db) 
-        return "Error: $(e)" 
-    end 
-end
-
-
 
 
 #DELETE
@@ -199,7 +187,104 @@ function update_meta_delete(db::SQLite.DB, meta_table::String)
         update_str = "UPDATE $meta_table SET row_num = ?"
         SQLite.execute(db, update_str, new_row_num)
     end
+end
 
+# Bulk deletion meta update: subtract count from row_num.
+function bulk_update_meta_delete(db::SQLite.DB, meta_table::String, count::Int)
+    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
+    rows = collect(SQLite.execute(db, q_str))
+    if isempty(rows)
+        return
+    end
+    row = rows[1]
+    old_row_num = row.row_num
+    new_row_num = max(old_row_num - count, 0)
+    if new_row_num == 0
+        stmt = "UPDATE $(meta_table) SET row_num = 0, vector_length = NULL"
+        SQLite.execute(db, stmt)
+    else
+        stmt = "UPDATE $(meta_table) SET row_num = ?"
+        SQLite.execute(db, stmt, new_row_num)
+    end
+end
+
+
+
+function insert_embedding(db::SQLite.DB, collection_name::String, id_text, embedding::AbstractVector{<:Number}; 
+    data_type::Union{Nothing,String}=nothing)
+    if data_type === nothing
+        data_type = infer_data_type(embedding)
+    end
+    emb_json = to_json_embedding(embedding)
+    stmt = """
+    INSERT INTO $collection_name (id_text, embedding_json, data_type)
+    VALUES (?, ?, ?)
+    """
+    SQLite.execute(db, stmt, (string(id_text), emb_json, data_type))
+    return "true"
+end
+
+function insert_embedding(db_path::String, collection_name::String, id_text, embedding::AbstractVector{<:Number}; 
+    data_type::Union{Nothing,String}=nothing)
+    db = open_db(db_path)
+    try 
+        msg = insert_embedding(db, collection_name, id_text, embedding; data_type=data_type)
+        update_meta(db, "$(collection_name)_meta", length(embedding))
+        close_db(db)
+        return msg
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+function bulk_insert_embedding(db::SQLite.DB, collection_name::String, 
+    id_texts::Vector{<:AbstractString}, embeddings::Vector{<:AbstractVector{<:Number}};
+    data_type::Union{Nothing,String}=nothing)
+
+    n = length(id_texts)
+    if n > BULK_LIMIT
+        error("Bulk insert limit exceeded: $n > $BULK_LIMIT")
+    end
+
+    if length(embeddings) != n
+        error("Mismatch between number of IDs and embeddings")
+    end
+
+    embedding_length = length(embeddings[1])
+    for e in embeddings
+        if length(e) != embedding_length
+            error("All embeddings must have the same length")
+        end
+    end
+
+    if data_type === nothing
+        data_type = infer_data_type(embeddings[1])
+    end
+    
+    params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
+    stmt = """
+    INSERT INTO $collection_name (id_text, embedding_json, data_type)
+    VALUES (?, ?, ?)
+    """
+    SQLite.execute(db, stmt, params)
+    update_meta_bulk(db, "$(collection_name)_meta", embedding_length, n)
+    return "true"
+end
+
+function bulk_insert_embedding(db_path::String, collection_name::String, 
+    id_texts::Vector{<:AbstractString}, embeddings::Vector{<:AbstractVector{<:Number}};
+    data_type::Union{Nothing,String}=nothing)
+
+    db = open_db(db_path)
+    try
+        msg = bulk_insert_embedding(db, collection_name, id_texts, embeddings; data_type=data_type)
+        close_db(db)
+        return msg
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
 end
 
 
@@ -209,7 +294,7 @@ function delete_embedding(db::SQLite.DB, collection_name::String, id_text)
     """
     check_iter = SQLite.execute(db, check_sql, (string(id_text),))
     found_rows = collect(check_iter)
-
+    
     if isempty(found_rows)
         return "notfound"
     end
@@ -219,14 +304,13 @@ function delete_embedding(db::SQLite.DB, collection_name::String, id_text)
     WHERE id_text = ?
     """
     SQLite.execute(db, delete_sql, (string(id_text),))
-
     update_meta_delete(db, "$(collection_name)_meta")
-
     return "true"
 end
 
 function delete_embedding(db_path::String, collection_name::String, id_text)
     db = open_db(db_path)
+    
     try
         msg = delete_embedding(db, collection_name, id_text)
         close_db(db)
@@ -238,14 +322,38 @@ function delete_embedding(db_path::String, collection_name::String, id_text)
 end
 
 
+function bulk_delete_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString})
+    n = length(id_texts)
+    
+    if n > BULK_LIMIT
+        error("Bulk delete limit exceeded: $n > $BULK_LIMIT")
+    end
+    
+    placeholders = join(fill("?", n), ", ")
+    stmt = "DELETE FROM $collection_name WHERE id_text IN ($placeholders)"
+    params = Tuple(string.(id_texts))
+    SQLite.execute(db, stmt, params)
+    bulk_update_meta_delete(db, "$(collection_name)_meta", n)
+    return "true"
+end
+
+function bulk_delete_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString})
+    db = open_db(db_path)
+    
+    try
+        msg = bulk_delete_embedding(db, collection_name, id_texts)
+        close_db(db)
+        return msg
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
 
 #UPDATE
-function update_embedding(db::SQLite.DB, 
-    collection_name::String, 
-    id_text, 
-    new_embedding::AbstractVector{<:Number}; 
+function update_embedding(db::SQLite.DB, collection_name::String, id_text, new_embedding::AbstractVector{<:Number};
     data_type::Union{Nothing,String}=nothing)
-
     check_sql = """
     SELECT 1 FROM $collection_name WHERE id_text = ?
     """
@@ -253,43 +361,33 @@ function update_embedding(db::SQLite.DB,
     if isempty(rows_found)
         return "notfound"
     end
-    
     meta_table = "$(collection_name)_meta"
     meta_sql = "SELECT vector_length FROM $meta_table"
     meta_rows = collect(SQLite.execute(db, meta_sql))
     if isempty(meta_rows)
         throw("No metadata found in $meta_table; can't validate dimension.")
     end
-    
     stored_length = meta_rows[1].vector_length
     new_length = length(new_embedding)
     if stored_length != new_length
         throw("Vector length mismatch: stored=$stored_length, new=$new_length")
     end
-    
     emb_json = to_json_embedding(new_embedding)
-    
     if data_type === nothing
         data_type = infer_data_type(new_embedding)
     end
-    
     update_sql = """
     UPDATE $collection_name
     SET embedding_json = ?, data_type = ?
     WHERE id_text = ?
     """
     SQLite.execute(db, update_sql, (emb_json, data_type, string(id_text)))
-    
     return "true"
 end
 
 
-function update_embedding(db_path::String,
-    collection_name::String,
-    id_text,
-    new_embedding::AbstractVector{<:Number};
+function update_embedding(db_path::String, collection_name::String, id_text, new_embedding::AbstractVector{<:Number};
     data_type::Union{Nothing,String}=nothing)
-    
     db = open_db(db_path)
     try
         msg = update_embedding(db, collection_name, id_text, new_embedding; data_type=data_type)
@@ -298,7 +396,62 @@ function update_embedding(db_path::String,
     catch e
         close_db(db)
         return "Error: $(e)"
-    end 
+    end
+end
+
+function bulk_update_embedding(db::SQLite.DB, collection_name::String, 
+    id_texts::Vector{<:AbstractString}, new_embeddings::Vector{<:AbstractVector{<:Number}};
+    data_type::Union{Nothing,String}=nothing)
+
+    n = length(id_texts)
+
+    if n > BULK_LIMIT
+        error("Bulk update limit exceeded: $n > $BULK_LIMIT")
+    end
+
+    if length(new_embeddings) != n
+        error("Mismatch between number of IDs and new embeddings")
+    end
+
+    embedding_length = length(new_embeddings[1])
+
+    for e in new_embeddings
+        if length(e) != embedding_length
+            error("All embeddings must have the same length")
+        end
+    end
+
+    if data_type === nothing
+        data_type = infer_data_type(new_embeddings[1])
+    end
+    
+    stmt = """
+    UPDATE $collection_name
+    SET embedding_json = ?, data_type = ?
+    WHERE id_text = ?
+    """
+
+    for i in 1:n
+        emb_json = to_json_embedding(new_embeddings[i])
+        SQLite.execute(db, stmt, (emb_json, data_type, string(id_texts[i])))
+    end
+    return "true"
+end
+
+function bulk_update_embedding(db_path::String, collection_name::String, 
+    id_texts::Vector{<:AbstractString}, new_embeddings::Vector{<:AbstractVector{<:Number}};
+    data_type::Union{Nothing,String}=nothing)
+
+    db = open_db(db_path)
+
+    try
+        msg = bulk_update_embedding(db, collection_name, id_texts, new_embeddings; data_type=data_type)
+        close_db(db)
+        return msg
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
 end
 
 
@@ -345,5 +498,40 @@ function get_embedding(db_path::String, collection_name::String, id_text)
     end
 end
 
+function bulk_get_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString})
+    n = length(id_texts)
+    if n > BULK_LIMIT
+        error("Bulk get limit exceeded: $n > $BULK_LIMIT")
+    end
+    placeholders = join(fill("?", n), ", ")
+    stmt = """
+    SELECT id_text, embedding_json, data_type FROM $collection_name
+    WHERE id_text IN ($placeholders)
+    """
+    params = Tuple(string.(id_texts))
+    rows = collect(SQLite.execute(db, stmt, params))
+    result = Dict{String,Any}()
+    for row in rows
+        id = row.id_text
+        raw_json = row.embedding_json
+        dt_string = row.data_type
+        T = parse_data_type(dt_string)
+        embedding_vec = JSON3.read(raw_json, Vector{T})
+        result[string(id)] = embedding_vec
+    end
+    return result
+end
+
+function bulk_get_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString})
+    db = open_db(db_path)
+    try
+        result = bulk_get_embedding(db, collection_name, id_texts)
+        close_db(db)
+        return result
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
 
 end #END MODULE
