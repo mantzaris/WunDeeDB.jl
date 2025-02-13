@@ -23,7 +23,6 @@ end
 
 ###################
 #TODO:
-#transactions and atomicity, SQLite.transaction(db) do...
 #linear exact search for Retrieval
 #make CRUD SQL statements constants global
 #journaling?...(PRAGMA journal_mode=WAL;)
@@ -64,7 +63,12 @@ function open_db(db_path::String)
             error("ERROR: Could not create directory $dirpath. Original error: $(e)")
         end
     end
-    return SQLite.DB(db_path)
+    db = SQLite.DB(db_path)
+
+    SQLite.execute(db, "PRAGMA journal_mode = WAL;")
+    SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
+
+    return db
 end
 
 function close_db(db::SQLite.DB)
@@ -77,7 +81,9 @@ function initialize_db(db_path::String, collection_name::String)
     db = open_db(db_path)
 
     try
-        #main embeddings table
+        SQLite.execute(db, "PRAGMA journal_mode = WAL;")
+        SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
+
         create_main_stmt = """
         CREATE TABLE IF NOT EXISTS $collection_name (
             id_text TEXT PRIMARY KEY,
@@ -215,7 +221,7 @@ function insert_embedding(db::SQLite.DB, collection_name::String, id_text, embed
         data_type = infer_data_type(embedding)
     end
     emb_json = to_json_embedding(embedding)
-    # Wrap both the insert and meta update in a transaction.
+    #put both the insert and meta update in a transaction.
     SQLite.transaction(db) do
         stmt = """
         INSERT INTO $collection_name (id_text, embedding_json, data_type)
@@ -291,7 +297,7 @@ end
 
 function delete_embedding(db::SQLite.DB, collection_name::String, id_text)
     SQLite.transaction(db) do
-        # Check for existence.
+        
         check_sql = """
         SELECT 1 FROM $collection_name WHERE id_text = ?
         """
@@ -300,13 +306,13 @@ function delete_embedding(db::SQLite.DB, collection_name::String, id_text)
         if isempty(found_rows)
             error("notfound")
         end
-        # Delete the record.
+        
         delete_sql = """
         DELETE FROM $collection_name
         WHERE id_text = ?
         """
         SQLite.execute(db, delete_sql, (string(id_text),))
-        # Update meta table.
+        
         update_meta_delete(db, "$(collection_name)_meta")
     end
     return "true"
@@ -331,12 +337,12 @@ function bulk_delete_embedding(db::SQLite.DB, collection_name::String, id_texts:
         error("Bulk delete limit exceeded: $n > $BULK_LIMIT")
     end
     SQLite.transaction(db) do
-        # Build an SQL IN clause with parameter placeholders.
+        
         placeholders = join(fill("?", n), ", ")
         stmt = "DELETE FROM $collection_name WHERE id_text IN ($placeholders)"
         params = Tuple(string.(id_texts))
         SQLite.execute(db, stmt, params)
-        # Update meta table in bulk.
+        
         bulk_update_meta_delete(db, "$(collection_name)_meta", n)
     end
     return "true"
