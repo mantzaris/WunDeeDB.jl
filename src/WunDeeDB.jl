@@ -7,6 +7,7 @@ export initialize_db,
         delete_embedding, bulk_delete_embedding, 
         update_embedding, bulk_update_embedding,
         get_embedding, bulk_get_embedding,
+        get_next_id, get_previous_id, 
         new_add
 
 """
@@ -25,11 +26,7 @@ end
 #TODO:
 #linear exact search for Retrieval
 #make CRUD SQL statements constants global
-#journaling?...(PRAGMA journal_mode=WAL;)
-#random look up? single or batch?
-#'next' embedding(s)?
-#count function?
-#get embedding size function?
+# parallelize the to and from JSON for the embeddings on bulk?     params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
 ###################
 
 const BULK_LIMIT = 1000
@@ -541,5 +538,192 @@ function bulk_get_embedding(db_path::String, collection_name::String, id_texts::
         return "Error: $(e)"
     end
 end
+
+
+#utility functions
+
+function get_next_id(db::SQLite.DB, collection_name::String, current_id; full_row::Bool=false)
+    if full_row
+        query = """
+            SELECT id_text, embedding_json, data_type
+            FROM $collection_name
+            WHERE id_text > ?
+            ORDER BY id_text ASC
+            LIMIT 1;
+        """
+    else
+        query = """
+            SELECT id_text
+            FROM $collection_name
+            WHERE id_text > ?
+            ORDER BY id_text ASC
+            LIMIT 1;
+        """
+    end
+    rows = collect(SQLite.execute(db, query, (current_id,)))
+    if isempty(rows)
+        return nothing
+    end
+    row = rows[1]
+    if !full_row
+        return row.id_text
+    else
+        # Parse the JSON embedding using the stored data type.
+        T = parse_data_type(row.data_type)
+        embedding_vec = JSON3.read(row.embedding_json, Vector{T})
+        return (id_text = row.id_text, embedding = embedding_vec, data_type = row.data_type)
+    end
+end
+
+function get_next_id(db_path::String, collection_name::String, current_id; full_row::Bool=false)
+    db = open_db(db_path)
+    try
+        result = get_next_id(db, collection_name, current_id; full_row=full_row)
+        close_db(db)
+        return result
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+function get_previous_id(db::SQLite.DB, collection_name::String, current_id; full_row::Bool=false)
+    if full_row
+        query = """
+            SELECT id_text, embedding_json, data_type
+            FROM $collection_name
+            WHERE id_text < ?
+            ORDER BY id_text DESC
+            LIMIT 1;
+        """
+    else
+        query = """
+            SELECT id_text
+            FROM $collection_name
+            WHERE id_text < ?
+            ORDER BY id_text DESC
+            LIMIT 1;
+        """
+    end
+    rows = collect(SQLite.execute(db, query, (current_id,)))
+    if isempty(rows)
+        return nothing
+    end
+    row = rows[1]
+    if !full_row
+        return row.id_text
+    else
+        T = parse_data_type(row.data_type)
+        embedding_vec = JSON3.read(row.embedding_json, Vector{T})
+        return (id_text = row.id_text, embedding = embedding_vec, data_type = row.data_type)
+    end
+end
+
+function get_previous_id(db_path::String, collection_name::String, current_id; full_row::Bool=false)
+    db = open_db(db_path)
+    try
+        result = get_previous_id(db, collection_name, current_id; full_row=full_row)
+        close_db(db)
+        return result
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+function count_entries(db::SQLite.DB, collection_name::String; update_meta::Bool=false)
+    stmt = "SELECT COUNT(*) AS count FROM $collection_name"
+    rows = collect(SQLite.execute(db, stmt))
+    count = rows[1].count
+    
+    if update_meta
+        if count > 0
+            update_stmt = "UPDATE $(collection_name)_meta SET row_num = ?"
+            SQLite.execute(db, update_stmt, (count,))
+        else
+            #if count is 0, clear the meta information.
+            update_stmt = "UPDATE $(collection_name)_meta SET row_num = 0, vector_length = NULL"
+            SQLite.execute(db, update_stmt)
+        end
+    end
+    
+    return count
+end
+
+function count_entries(db_path::String, collection_name::String; update_meta::Bool=false)
+    db = open_db(db_path)
+    try
+        count = count_entries(db, collection_name; update_meta=update_meta)
+        close_db(db)
+        return count
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+
+function get_embedding_size(db::SQLite.DB, collection_name::String)
+    stmt = "SELECT vector_length FROM $(collection_name)_meta"
+    rows = collect(SQLite.execute(db, stmt))
+    if isempty(rows)
+        return 0
+    else
+        return rows[1].vector_length
+    end
+end
+
+function get_embedding_size(db_path::String, collection_name::String)
+    db = open_db(db_path)
+    try
+        size = get_embedding_size(db, collection_name)
+        close_db(db)
+        return size
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+
+function random_embeddings(db::SQLite.DB, collection_name::String, num::Int)
+
+    if num < 1 || num > BULK_LIMIT
+        error("Requested number of random embeddings must be between 1 and $BULK_LIMIT")
+    end
+
+    stmt = """
+        SELECT id_text, embedding_json, data_type 
+        FROM $collection_name 
+        ORDER BY RANDOM() 
+        LIMIT ?;
+    """
+    rows = collect(SQLite.execute(db, stmt, (num,)))
+    
+    results = Vector{Dict{String,Any}}(undef, length(rows))
+
+    for (i, row) in enumerate(rows)
+        T = parse_data_type(row.data_type)
+        embedding = JSON3.read(row.embedding_json, Vector{T})
+        results[i] = Dict("id_text" => row.id_text, "embedding" => embedding, "data_type" => row.data_type)
+    end
+
+    return results
+end
+
+function random_embeddings(db_path::String, collection_name::String, num::Int)
+    db = open_db(db_path)
+    try
+        result = random_embeddings(db, collection_name, num)
+        close_db(db)
+        return result
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+
+
 
 end #END MODULE
