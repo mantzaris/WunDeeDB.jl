@@ -1,32 +1,21 @@
-module WunDeeD
+module WunDeeDB
 
 using SQLite, JSON3
 
 export initialize_db, 
+        open_db, close_db,
         insert_embedding, bulk_insert_embedding, 
         delete_embedding, bulk_delete_embedding, 
         update_embedding, bulk_update_embedding,
         get_embedding, bulk_get_embedding,
-        get_next_id, get_previous_id, 
-        new_add
+        get_next_id, get_previous_id
 
-"""
-This function adds two numbers.
-
-# Example(s)
-    julia> new_add(2,3)
-    5
-"""
-function new_add(a, b)
-    return a + b
-end
-
+        
 
 ###################
 #TODO:
 #linear exact search for Retrieval
-#make CRUD SQL statements constants global
-# parallelize the to and from JSON for the embeddings on bulk?     params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
+#parallelize the to and from JSON for the embeddings on bulk?     params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
 ###################
 
 const BULK_LIMIT = 1000
