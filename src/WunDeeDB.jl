@@ -8,7 +8,8 @@ export initialize_db,
         delete_embedding, bulk_delete_embedding, 
         update_embedding, bulk_update_embedding,
         get_embedding, bulk_get_embedding,
-        get_next_id, get_previous_id
+        get_next_id, get_previous_id,
+        count_entries, get_embedding_size, random_embeddings
 
         
 
@@ -188,7 +189,8 @@ end
 # Bulk deletion meta update: subtract count from row_num.
 function bulk_update_meta_delete(db::SQLite.DB, meta_table::String, count::Int)
     q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    rows = collect(SQLite.execute(db, q_str))
+    # Use DBInterface.execute combined with Tables.namedtupleiterator
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
     if isempty(rows)
         return
     end
@@ -197,10 +199,10 @@ function bulk_update_meta_delete(db::SQLite.DB, meta_table::String, count::Int)
     new_row_num = max(old_row_num - count, 0)
     if new_row_num == 0
         stmt = "UPDATE $(meta_table) SET row_num = 0, vector_length = NULL"
-        SQLite.execute(db, stmt)
+        DBInterface.execute(db, stmt)
     else
         stmt = "UPDATE $(meta_table) SET row_num = ?"
-        SQLite.execute(db, stmt, new_row_num)
+        DBInterface.execute(db, stmt, (new_row_num,))
     end
 end
 
@@ -249,22 +251,31 @@ function bulk_insert_embedding(db::SQLite.DB, collection_name::String,
     if length(embeddings) != n
         error("Mismatch between number of IDs and embeddings")
     end
+
     embedding_length = length(embeddings[1])
     for e in embeddings
         if length(e) != embedding_length
             error("All embeddings must have the same length")
         end
     end
+
     if data_type === nothing
         data_type = infer_data_type(embeddings[1])
     end
+
+    #build parameters for each row
     params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
+
     SQLite.transaction(db) do
         stmt = """
         INSERT INTO $collection_name (id_text, embedding_json, data_type)
         VALUES (?, ?, ?)
         """
-        SQLite.execute(db, stmt, params)
+        #TODO improve?..
+        #INSERTiING EACH ROW INDEPENDENTLY
+        for p in params
+            SQLite.execute(db, stmt, p)
+        end
         update_meta_bulk(db, "$(collection_name)_meta", embedding_length, n)
     end
     return "true"
@@ -288,18 +299,17 @@ end
 
 function delete_embedding(db::SQLite.DB, collection_name::String, id_text)
     SQLite.transaction(db) do
-        
         check_sql = """
-        SELECT 1 FROM $collection_name WHERE id_text = ?
+        SELECT 1 AS found FROM $(collection_name) WHERE id_text = ?
         """
-        check_iter = SQLite.execute(db, check_sql, (string(id_text),))
-        found_rows = collect(check_iter)
+        #use DBInterface.execute with Tables.namedtupleiterator for consistent row conversion
+        found_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(id_text),))))
         if isempty(found_rows)
             error("notfound")
         end
-        
+
         delete_sql = """
-        DELETE FROM $collection_name
+        DELETE FROM $(collection_name)
         WHERE id_text = ?
         """
         SQLite.execute(db, delete_sql, (string(id_text),))
@@ -322,18 +332,21 @@ function delete_embedding(db_path::String, collection_name::String, id_text)
 end
 
 
+
 function bulk_delete_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString})
     n = length(id_texts)
     if n > BULK_LIMIT
         error("Bulk delete limit exceeded: $n > $BULK_LIMIT")
     end
     SQLite.transaction(db) do
-        
+        #build a string of comma‐separated placeholders
         placeholders = join(fill("?", n), ", ")
         stmt = "DELETE FROM $collection_name WHERE id_text IN ($placeholders)"
+        #convert each id_text to a string and pack them into a tuple
         params = Tuple(string.(id_texts))
         SQLite.execute(db, stmt, params)
         
+        #update the meta table to subtract the deleted rows
         bulk_update_meta_delete(db, "$(collection_name)_meta", n)
     end
     return "true"
@@ -353,38 +366,47 @@ end
 
 
 
+
 #UPDATE
 function update_embedding(db::SQLite.DB, collection_name::String, id_text, new_embedding::AbstractVector{<:Number};
     data_type::Union{Nothing,String}=nothing)
     SQLite.transaction(db) do
+        #check that the record exists
         check_sql = """
-        SELECT 1 FROM $collection_name WHERE id_text = ?
+        SELECT 1 AS found FROM $(collection_name) WHERE id_text = ?
         """
-        rows_found = collect(SQLite.execute(db, check_sql, (string(id_text),)))
+        rows_found = collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(id_text),))))
         if isempty(rows_found)
             error("notfound")
         end
+
+        #retrieve metadata to validate the embedding dimension
         meta_table = "$(collection_name)_meta"
-        meta_sql = "SELECT vector_length FROM $meta_table"
-        meta_rows = collect(SQLite.execute(db, meta_sql))
+        meta_sql = "SELECT vector_length FROM $(meta_table)"
+        meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, meta_sql)))
         if isempty(meta_rows)
-            throw("No metadata found in $meta_table; can't validate dimension.")
+            error("No metadata found in $(meta_table); can't validate dimension.")
         end
+
         stored_length = meta_rows[1].vector_length
         new_length = length(new_embedding)
         if stored_length != new_length
-            throw("Vector length mismatch: stored=$stored_length, new=$new_length")
+            error("Vector length mismatch: stored=$(stored_length), new=$(new_length)")
         end
+
+        #convert the new embedding to JSON
         emb_json = to_json_embedding(new_embedding)
         if data_type === nothing
             data_type = infer_data_type(new_embedding)
         end
+
+        #update the record
         update_sql = """
-        UPDATE $collection_name
+        UPDATE $(collection_name)
         SET embedding_json = ?, data_type = ?
         WHERE id_text = ?
         """
-        SQLite.execute(db, update_sql, (emb_json, data_type, string(id_text)))
+        DBInterface.execute(db, update_sql, (emb_json, data_type, string(id_text)))
     end
     return "true"
 end
@@ -426,7 +448,7 @@ function bulk_update_embedding(db::SQLite.DB, collection_name::String,
 
     SQLite.transaction(db) do
         stmt = """
-        UPDATE $collection_name
+        UPDATE $(collection_name)
         SET embedding_json = ?, data_type = ?
         WHERE id_text = ?
         """
@@ -454,6 +476,7 @@ end
 
 
 
+
 #RETRIEVE
 function parse_data_type(dt::String) 
     T = get(DATA_TYPE_MAP, dt, nothing) 
@@ -464,15 +487,17 @@ function parse_data_type(dt::String)
     return T 
 end
 
-function get_embedding(db::SQLite.DB, collection_name::String, id_text) 
-    sql = """ 
-    SELECT embedding_json, data_type 
-    FROM $collection_name 
-    WHERE id_text = ? 
-    """ 
-    rows = collect(SQLite.execute(db, sql, (string(id_text),))) 
-    if isempty(rows) 
-        return nothing 
+
+function get_embedding(db::SQLite.DB, collection_name::String, id_text)
+    sql = """
+    SELECT embedding_json, data_type
+    FROM $(collection_name)
+    WHERE id_text = ?
+    """
+    #use DBInterface.execute and convert the results into NamedTuples
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, sql, (string(id_text),))))
+    if isempty(rows)
+        return nothing
     end
 
     row = rows[1]
@@ -484,6 +509,7 @@ function get_embedding(db::SQLite.DB, collection_name::String, id_text)
 
     return embedding_vec
 end
+
 
 function get_embedding(db_path::String, collection_name::String, id_text)
     db = open_db(db_path)
@@ -497,6 +523,7 @@ function get_embedding(db_path::String, collection_name::String, id_text)
     end
 end
 
+
 function bulk_get_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString})
     n = length(id_texts)
     if n > BULK_LIMIT
@@ -504,11 +531,12 @@ function bulk_get_embedding(db::SQLite.DB, collection_name::String, id_texts::Ve
     end
     placeholders = join(fill("?", n), ", ")
     stmt = """
-    SELECT id_text, embedding_json, data_type FROM $collection_name
+    SELECT id_text, embedding_json, data_type FROM $(collection_name)
     WHERE id_text IN ($placeholders)
     """
     params = Tuple(string.(id_texts))
-    rows = collect(SQLite.execute(db, stmt, params))
+    #use DBInterface.execute and convert the result into NamedTuples
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
     result = Dict{String,Any}()
     for row in rows
         id = row.id_text
@@ -540,7 +568,7 @@ function get_next_id(db::SQLite.DB, collection_name::String, current_id; full_ro
     if full_row
         query = """
             SELECT id_text, embedding_json, data_type
-            FROM $collection_name
+            FROM $(collection_name)
             WHERE id_text > ?
             ORDER BY id_text ASC
             LIMIT 1;
@@ -548,13 +576,14 @@ function get_next_id(db::SQLite.DB, collection_name::String, current_id; full_ro
     else
         query = """
             SELECT id_text
-            FROM $collection_name
+            FROM $(collection_name)
             WHERE id_text > ?
             ORDER BY id_text ASC
             LIMIT 1;
         """
     end
-    rows = collect(SQLite.execute(db, query, (current_id,)))
+    #use DBInterface.execute with Tables.namedtupleiterator for proper row conversion
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (current_id,))))
     if isempty(rows)
         return nothing
     end
@@ -562,7 +591,7 @@ function get_next_id(db::SQLite.DB, collection_name::String, current_id; full_ro
     if !full_row
         return row.id_text
     else
-        # Parse the JSON embedding using the stored data type.
+        #parse the JSON embedding using the stored data type
         T = parse_data_type(row.data_type)
         embedding_vec = JSON3.read(row.embedding_json, Vector{T})
         return (id_text = row.id_text, embedding = embedding_vec, data_type = row.data_type)
@@ -581,11 +610,12 @@ function get_next_id(db_path::String, collection_name::String, current_id; full_
     end
 end
 
+
 function get_previous_id(db::SQLite.DB, collection_name::String, current_id; full_row::Bool=false)
     if full_row
         query = """
             SELECT id_text, embedding_json, data_type
-            FROM $collection_name
+            FROM $(collection_name)
             WHERE id_text < ?
             ORDER BY id_text DESC
             LIMIT 1;
@@ -593,13 +623,14 @@ function get_previous_id(db::SQLite.DB, collection_name::String, current_id; ful
     else
         query = """
             SELECT id_text
-            FROM $collection_name
+            FROM $(collection_name)
             WHERE id_text < ?
             ORDER BY id_text DESC
             LIMIT 1;
         """
     end
-    rows = collect(SQLite.execute(db, query, (current_id,)))
+    # using DBInterface.execute with Tables.namedtupleiterator to get NamedTuples.
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (current_id,))))
     if isempty(rows)
         return nothing
     end
@@ -626,18 +657,19 @@ function get_previous_id(db_path::String, collection_name::String, current_id; f
 end
 
 function count_entries(db::SQLite.DB, collection_name::String; update_meta::Bool=false)
-    stmt = "SELECT COUNT(*) AS count FROM $collection_name"
-    rows = collect(SQLite.execute(db, stmt))
+    stmt = "SELECT COUNT(*) AS count FROM $(collection_name)"
+    #using DBInterface.execute with Tables.namedtupleiterator so that we get a NamedTuple with field "count"
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt)))
     count = rows[1].count
     
     if update_meta
         if count > 0
             update_stmt = "UPDATE $(collection_name)_meta SET row_num = ?"
-            SQLite.execute(db, update_stmt, (count,))
+            DBInterface.execute(db, update_stmt, (count,))
         else
             #if count is 0, clear the meta information.
             update_stmt = "UPDATE $(collection_name)_meta SET row_num = 0, vector_length = NULL"
-            SQLite.execute(db, update_stmt)
+            DBInterface.execute(db, update_stmt)
         end
     end
     
@@ -659,7 +691,7 @@ end
 
 function get_embedding_size(db::SQLite.DB, collection_name::String)
     stmt = "SELECT vector_length FROM $(collection_name)_meta"
-    rows = collect(SQLite.execute(db, stmt))
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt)))
     if isempty(rows)
         return 0
     else
@@ -679,23 +711,21 @@ function get_embedding_size(db_path::String, collection_name::String)
     end
 end
 
-
 function random_embeddings(db::SQLite.DB, collection_name::String, num::Int)
-
     if num < 1 || num > BULK_LIMIT
         error("Requested number of random embeddings must be between 1 and $BULK_LIMIT")
     end
 
     stmt = """
         SELECT id_text, embedding_json, data_type 
-        FROM $collection_name 
+        FROM $(collection_name)
         ORDER BY RANDOM() 
         LIMIT ?;
     """
-    rows = collect(SQLite.execute(db, stmt, (num,)))
+    # DBInterface.execute together with Tables.namedtupleiterator.
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, (num,))))
     
     results = Vector{Dict{String,Any}}(undef, length(rows))
-
     for (i, row) in enumerate(rows)
         T = parse_data_type(row.data_type)
         embedding = JSON3.read(row.embedding_json, Vector{T})
@@ -716,6 +746,7 @@ function random_embeddings(db_path::String, collection_name::String, num::Int)
         return "Error: $(e)"
     end
 end
+
 
 
 
