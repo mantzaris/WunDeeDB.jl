@@ -1,6 +1,6 @@
 module WunDeeDB
 
-using SQLite, JSON3
+using SQLite, JSON3, Tables
 
 export initialize_db, 
         open_db, close_db,
@@ -113,7 +113,7 @@ end
 # Meta Table Helpers
 function update_meta(db::SQLite.DB, meta_table::String, embedding_length::Int)
     q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    rows = collect(SQLite.execute(db, q_str))
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
     if isempty(rows)
         stmt = """
         INSERT INTO $(meta_table) (row_num, vector_length)
@@ -126,57 +126,62 @@ function update_meta(db::SQLite.DB, meta_table::String, embedding_length::Int)
         old_vec_len = row.vector_length
         new_row_num = old_row_num + 1
         if old_vec_len != embedding_length
-            throw("Vector length mismatch: existing=$old_vec_len, new=$embedding_length.")
+            error("Vector length mismatch: existing=$(old_vec_len), new=$(embedding_length).")
         end
         stmt = "UPDATE $(meta_table) SET row_num = ?"
-        SQLite.execute(db, stmt, new_row_num)
+        SQLite.execute(db, stmt, (new_row_num,))
     end
 end
+
 
 # Bulk version: add `count` rows
 function update_meta_bulk(db::SQLite.DB, meta_table::String, embedding_length::Int, count::Int)
     q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    rows = collect(SQLite.execute(db, q_str))
+    #use DBInterface.execute to obtain a result set that supports the Tables interface!!!!
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
     if isempty(rows)
         stmt = """
         INSERT INTO $(meta_table) (row_num, vector_length)
         VALUES (?, ?)
         """
-        SQLite.execute(db, stmt, (count, embedding_length))
+        DBInterface.execute(db, stmt, (count, embedding_length))
     else
         row = rows[1]
         old_row_num = row.row_num
         old_vec_len = row.vector_length
         if old_vec_len != embedding_length
-            throw("Vector length mismatch in meta: existing=$old_vec_len, new=$embedding_length")
+            error("Vector length mismatch in meta: existing=$old_vec_len, new=$embedding_length")
         end
         new_row_num = old_row_num + count
         stmt = "UPDATE $(meta_table) SET row_num = ?"
-        SQLite.execute(db, stmt, new_row_num)
+        DBInterface.execute(db, stmt, (new_row_num,))
     end
 end
 
 
+
+
 #DELETE
-function update_meta_delete(db::SQLite.DB, meta_table::String) 
-    q_str = "SELECT row_num, vector_length FROM $meta_table" 
-    rows = collect(SQLite.execute(db, q_str)) 
-    if isempty(rows) 
-        return 
+function update_meta_delete(db::SQLite.DB, meta_table::String)
+    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str))) #table interface!!! 
+    if isempty(rows)
+        return
     end
 
     row = rows[1]
     old_row_num = row.row_num
+
     old_vec_len = row.vector_length
 
     new_row_num = max(old_row_num - 1, 0)
 
     if new_row_num == 0
-        update_str = "UPDATE $meta_table SET row_num = 0, vector_length = NULL"
+        update_str = "UPDATE $(meta_table) SET row_num = 0, vector_length = NULL"
         SQLite.execute(db, update_str)
     else
-        update_str = "UPDATE $meta_table SET row_num = ?"
-        SQLite.execute(db, update_str, new_row_num)
+        update_str = "UPDATE $(meta_table) SET row_num = ?"
+        SQLite.execute(db, update_str, (new_row_num,))
     end
 end
 
