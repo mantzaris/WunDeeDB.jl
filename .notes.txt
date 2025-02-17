@@ -13,4 +13,8 @@ using WundDeeDB
 .../repos/WundDeeDB.jl$ julia --project=. docs/make.jl
 
 # or for the docs 
+julia --project=docs -e 'using Pkg; Pkg.instantiate()'
+julia --project=docs -e 'using Pkg; Pkg.resolve()'
+
+# or for the docs 
 julia --project=docs/ docs/make.jl
