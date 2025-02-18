@@ -1,9 +1,13 @@
 module WunDeeDB
 
-using SQLite, JSON3, Tables
+using SQLite
+using Tables, DBInterface
+using JSON3
 
-export initialize_db, 
-        open_db, close_db,
+
+export get_supported_data_types, get_supported_endianness_types
+        initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
+        to_json_embedding, infer_data_type,
         insert_embedding, bulk_insert_embedding, 
         delete_embedding, bulk_delete_embedding, 
         update_embedding, bulk_update_embedding,
@@ -15,13 +19,11 @@ export initialize_db,
 
 ###################
 #TODO:
-#linear exact search for Retrieval
-#parallelize the to and from JSON for the embeddings on bulk?     params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
+#linear exact search for Retrieval (brute force)
+#IVF, HSNW
 ###################
 
-const BULK_LIMIT = 1000
-
-#TODO add Float8s, https://github.com/JuliaMath/Float8s.jl
+#TODO: add Float8s, https://github.com/JuliaMath/Float8s.jl
 const DATA_TYPE_MAP = Dict(
     "Float16"  => Float16,
     "Float32"  => Float32,
@@ -39,8 +41,103 @@ const DATA_TYPE_MAP = Dict(
     "UInt128"  => UInt128
 )
 
+const ENDIANNESS_TYPES = ["small", "big"]
 
-# DB connection fns 
+const main_table_name = "Embeddings"
+const meta_data_table_name = "EmbeddingsMetaData"
+
+const create_main_table_stmt = """
+        CREATE TABLE IF NOT EXISTS $(main_table_name) (
+            id_text TEXT PRIMARY KEY,
+            embedding_blob BLOB NOT NULL
+        )
+        """
+
+const create_meta_table_stmt = """
+       CREATE TABLE IF NOT EXISTS $(meta_data_table_name) (
+	   embedding_count BIGINT,
+	   embedding_length INT,
+	   data_type TEXT NOT NULL,
+           endianness TEXT NOT NULL
+       )
+       """
+
+const delete_embeddings_stmt = "DELETE FROM $(main_table_name)"
+
+const meta_table_full_row_insertion_stmt = """
+        INSERT INTO $(meta_data_table_name) (embedding_count, embedding_length, data_type, endianness)
+        VALUES (?, ?, ?, ?)
+        """
+
+const meta_select_all_query = "SELECT * FROM $(meta_data_table_name)"
+const meta_update_query = "UPDATE $(meta_data_table_name) SET embedding_count = ?"
+const meta_reset_stmt = "UPDATE $(meta_data_table_name) SET embedding_count = 0"
+
+
+"""
+get_supported_data_types() -> Vector{String}
+
+Returns a sorted vector of supported data type names as strings.
+"""
+function get_supported_data_types()::Vector{String}
+    return sort(collect(keys(DATA_TYPE_MAP)))
+end
+
+"""
+get_supported_endianness_types() -> Vector{String}
+
+Returns a sorted vector of supported endianness as strings.
+"""
+function get_supported_endianness_types()::Vector{String}
+    return sort(collect(keys(ENDIANNESS_TYPES)))
+end
+
+
+#TODO: docstring
+function initialize_db(db_path::String, embedding_length::Int, data_type::String, endianness::String)
+
+    arg_support_string = ""
+
+    if !(data_type in keys(DATA_TYPE_MAP))
+        arg_support_string *= "Unsupported data_type, run get_supported_data_types() to get the supported types. "
+    end
+
+    if !( endianness in ENDIANNESS_TYPES )
+        arg_support_string *= "Unsupported endianness type, run get_supported_endianness_types() to get the supported. "
+    end
+
+    if embedding_length < 1
+        arg_support_string *= "Embedding_length must be 1 or greater. "
+    end
+
+    if length(arg_support_string) > 0
+        return arg_support_string
+    end
+
+    db = open_db(db_path)
+    
+    try
+        SQLite.execute(db, "PRAGMA journal_mode = WAL;")
+        SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
+
+        SQLite.execute(db, create_main_table_stmt)
+        SQLite.execute(db, create_meta_table_stmt)
+
+        rows = collect(SQLite.Query(db, meta_select_all_query))
+
+        if isempty(rows) #if empty, insert initial meta information
+            #in initial stage set embedding_count to 0 because no embeddings have been added yet
+            SQLite.execute(db, meta_table_full_row_insertion_stmt, (0, embedding_length, data_type, endianness))
+        end
+
+        close_db(db)
+        return true
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
 
 """
 open_db(db_path::String) -> SQLite.DB
@@ -93,6 +190,7 @@ function open_db(db_path::String)
     return db
 end
 
+
 """ close_db(db::SQLite.DB)
 
 Close an open SQLite database connection.
@@ -114,74 +212,28 @@ function close_db(db::SQLite.DB)
 end
 
 
-# Initialization 
-
-"""
-initialize_db(db_path::String, collection_name::String) -> String
-
-Initialize an SQLite database for storing embedding records and corresponding metadata.
-
-This function performs the following operations:
-1. Opens the SQLite database located at `db_path`.
-2. Configures the database for improved write performance by setting:
-   - `journal_mode` to `WAL` (Write-Ahead Logging).
-   - `synchronous` to `NORMAL`.
-3. Creates the main table for storing embeddings if it does not already exist. The table is named as specified by `collection_name` and includes:
-   - `id_text` (TEXT PRIMARY KEY): A unique identifier for each embedding record.
-   - `embedding_json` (TEXT NOT NULL): The JSON-encoded embedding vector.
-   - `data_type` (TEXT): A column to store information about the data type of the embedding.
-4. Creates a metadata table (named `\$(collection_name)_meta`) if it does not already exist. This table stores:
-   - `row_num` (BIGINT): The number of embedding records.
-   - `vector_length` (INT): The length of the embedding vectors.
-
-After performing these steps, the function closes the database connection. On successful initialization, it returns `"true"`.  
-If an error occurs during the process, the function ensures that the database is closed and returns an error message string.
-
-# Arguments
-- `db_path::String`: The file path to the SQLite database.
-- `collection_name::String`: The base name for the main collection table. The associated metadata table will be named as `\$(collection_name)_meta`.
-
-# Returns
-- A `String`:
-  - `"true"` if the database is successfully initialized.
-  - A descriptive error message if an error occurs.
-
-# Example
-```julia
-result = initialize_db("mydatabase.sqlite", "embeddings")
-if result == "true"
-    println("Database initialized successfully.")
-else
-    println("Database initialization failed: ", result)
+# TODO: doc string (public)
+function delete_db(db_path::String)
+    if isfile(db_path)
+        try
+            rm(db_path)
+            return true
+        catch e
+            return "Error deleting DB: $(e)"
+        end
+    else
+        return "Database file does not exist."
+    end
 end
-"""
-function initialize_db(db_path::String, collection_name::String)
+
+# TODO: doc string (public)
+function delete_all_embeddings(db_path::String)
     db = open_db(db_path)
-
     try
-        SQLite.execute(db, "PRAGMA journal_mode = WAL;")
-        SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
-
-        create_main_stmt = """
-        CREATE TABLE IF NOT EXISTS $collection_name (
-            id_text TEXT PRIMARY KEY,
-            embedding_json TEXT NOT NULL,
-            data_type TEXT
-        )
-        """
-        SQLite.execute(db, create_main_stmt)
-
-        #meta table
-        meta_stmt = """
-        CREATE TABLE IF NOT EXISTS $(collection_name)_meta (
-            row_num BIGINT,
-            vector_length INT
-        )
-        """
-        SQLite.execute(db, meta_stmt)
-
+        SQLite.execute(db, delete_embeddings_stmt) #clear all embeddings
+        SQLite.execute(db, meta_reset_stmt) #reset the embedding count to 0
         close_db(db)
-        return "true"
+        return true
     catch e
         close_db(db)
         return "Error: $(e)"
@@ -189,66 +241,48 @@ function initialize_db(db_path::String, collection_name::String)
 end
 
 
-
-# Serialization Helpers
+# TODO: doc string (public)
 function to_json_embedding(vec::AbstractVector{<:Number})
     return JSON3.write(vec)
 end
 
+# TODO: doc string (public)
 function infer_data_type(embedding::AbstractVector{<:Number}) 
     elty = eltype(embedding)
     return string(elty) 
 end
 
 
-
-# Meta Table Helpers
-function update_meta(db::SQLite.DB, meta_table::String, embedding_length::Int)
-    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
+# doc string private
+function update_meta(db::SQLite.DB, count::Int=1)
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, meta_select_all_query)))
+    
     if isempty(rows)
-        stmt = """
-        INSERT INTO $(meta_table) (row_num, vector_length)
-        VALUES (?, ?)
-        """
-        SQLite.execute(db, stmt, (1, embedding_length))
+        error("Meta data table is empty. The meta row should have been initialized during database setup.")
     else
         row = rows[1]
-        old_row_num = row.row_num
-        old_vec_len = row.vector_length
-        new_row_num = old_row_num + 1
-        if old_vec_len != embedding_length
-            error("Vector length mismatch: existing=$(old_vec_len), new=$(embedding_length).")
-        end
-        stmt = "UPDATE $(meta_table) SET row_num = ?"
-        SQLite.execute(db, stmt, (new_row_num,))
+        current_count = row.embedding_count
+        new_count = current_count + count
+        
+        SQLite.execute(db, meta_update_query, (new_count,))
     end
 end
 
 
-# Bulk version: add `count` rows
-function update_meta_bulk(db::SQLite.DB, meta_table::String, embedding_length::Int, count::Int)
-    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    #use DBInterface.execute to obtain a result set that supports the Tables interface!!!!
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
-    if isempty(rows)
-        stmt = """
-        INSERT INTO $(meta_table) (row_num, vector_length)
-        VALUES (?, ?)
-        """
-        DBInterface.execute(db, stmt, (count, embedding_length))
-    else
-        row = rows[1]
-        old_row_num = row.row_num
-        old_vec_len = row.vector_length
-        if old_vec_len != embedding_length
-            error("Vector length mismatch in meta: existing=$old_vec_len, new=$embedding_length")
-        end
-        new_row_num = old_row_num + count
-        stmt = "UPDATE $(meta_table) SET row_num = ?"
-        DBInterface.execute(db, stmt, (new_row_num,))
-    end
-end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
