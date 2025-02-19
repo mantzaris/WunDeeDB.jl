@@ -78,7 +78,7 @@ const INSERT_EMBEDDING_STMT = "INSERT INTO $MAIN_TABLE_NAME (id_text, embedding_
 
 
 """
-get_supported_data_types() -> Vector{String}
+    get_supported_data_types() -> Vector{String}
 
 Returns a sorted vector of supported data type names as strings.
 """
@@ -87,13 +87,16 @@ function get_supported_data_types()::Vector{String}
 end
 
 """
-get_supported_endianness_types() -> Vector{String}
+    get_supported_endianness_types() -> Vector{String}
 
-Returns a sorted vector of supported endianness as strings.
+Returns a sorted vector of supported endianness types as strings.
 """
 function get_supported_endianness_types()::Vector{String}
     return sort(ENDIANNESS_TYPES)
 end
+
+
+
 
 
 
@@ -117,7 +120,7 @@ result = initialize_db("my_database.db", 128, "float32", endianness="little")
 if result === true
     println("Database initialized successfully!")
 else
-    println("Initialization failed: $result")
+    println("Initialization failed: 'result'")
 end
 
 """
@@ -255,7 +258,7 @@ result = delete_db("my_database.db")
 if result === true
     println("Database deleted successfully.")
 else
-    println("Error: $result")
+    println("Error: 'result'")
 end
 
 """
@@ -288,7 +291,7 @@ result = delete_all_embeddings("my_database.db")
 if result === true
     println("Embeddings deleted successfully.")
 else
-    println("Error: $result")
+    println("Error: 'result'")
 end
 
 """
@@ -789,7 +792,7 @@ Using a database file path:
 
 embeddings = get_embeddings("my_database.db", [1, 2, 3])
 for (id, emb) in embeddings
-    println("ID: $id, Embedding: ", emb)
+    println("ID: 'id', Embedding: ", emb)
 end
 
 """
@@ -867,7 +870,7 @@ This function is overloaded to support two usage patterns:
 ```julia
 embeddings = random_embeddings("my_database.db", 5)
 for (id, emb) in embeddings
-    println("ID: $id, Embedding: ", emb)
+    println("ID: 'id', Embedding: ", emb)
 end
 
 """ 
