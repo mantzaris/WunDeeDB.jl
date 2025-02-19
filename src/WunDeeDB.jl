@@ -7,15 +7,15 @@ using JSON3
 
 export get_supported_data_types, get_supported_endianness_types
         initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
-        to_json_embedding, infer_data_type,
-        insert_embedding, #TODO: make plural
-        delete_embedding, #TODO: make plural 
-        update_embedding, #TODO: make plural 
-        get_embedding, #TODO: make plural
+        get_meta_data,
+        infer_data_type,
+        insert_embeddings,
+        delete_embeddings,
+        update_embeddings,
+        get_embeddings,
         random_embeddings, 
-        get_next_id, get_previous_id,
-        count_entries, 
-        get_embedding_size #TODO: get meta data fn?/?
+        get_adjacent_id,
+        count_entries
 
         
 
@@ -25,7 +25,6 @@ export get_supported_data_types, get_supported_endianness_types
 #IVF, HSNW
 ###################
 
-#TODO: add Float8s, https://github.com/JuliaMath/Float8s.jl
 const DATA_TYPE_MAP = Dict(
     "Float16"  => Float16,
     "Float32"  => Float32,
@@ -97,9 +96,31 @@ function get_supported_endianness_types()::Vector{String}
 end
 
 
-#TODO: docstring
-#TODO: make endianness optional that it is inferred if not provided
-function initialize_db(db_path::String, embedding_length::Int, data_type::String, endianness::String)
+
+"""
+Initialize a SQLite database by setting up the main and meta tables with appropriate configuration.
+
+# Arguments
+- `db_path::String`: Path to the SQLite database file.
+- `embedding_length::Int`: Length of the embedding vector. Must be 1 or greater.
+- `data_type::String`: Data type for the embeddings. Must be one of the supported types (use `get_supported_data_types()` to see valid options).
+- `endianness::String="small"`: Endianness setting. Must be one of the allowed types (see `get_supported_endianness_types()`).
+
+# Returns
+- `true` on successful initialization.
+- A `String` error message if any parameter is invalid or if an exception occurs during initialization.
+
+# Example
+```julia
+result = initialize_db("my_database.db", 128, "float32", endianness="little")
+if result === true
+    println("Database initialized successfully!")
+else
+    println("Initialization failed: $result")
+end
+
+"""
+function initialize_db(db_path::String, embedding_length::Int, data_type::String; endianness::String="small")
 
     arg_support_string = ""
 
@@ -217,7 +238,26 @@ function close_db(db::SQLite.DB)
 end
 
 
-# TODO: doc string (public)
+"""
+Delete the database file at the specified path.
+
+# Arguments
+- `db_path::String`: The file path of the database to delete.
+
+# Returns
+- `true` if the file was successfully deleted.
+- A `String` error message if deletion fails or if the file does not exist.
+
+# Example
+```julia
+result = delete_db("my_database.db")
+if result === true
+    println("Database deleted successfully.")
+else
+    println("Error: $result")
+end
+
+"""
 function delete_db(db_path::String)
     if isfile(db_path)
         try
@@ -231,7 +271,26 @@ function delete_db(db_path::String)
     end
 end
 
-# TODO: doc string (public)
+"""
+Delete all embeddings from the database at the specified path and reset the embedding count.
+
+# Arguments
+- `db_path::String`: The file path of the SQLite database.
+
+# Returns
+- `true` if the operation is successful.
+- A `String` error message if an error occurs.
+
+# Example
+```julia
+result = delete_all_embeddings("my_database.db")
+if result === true
+    println("Embeddings deleted successfully.")
+else
+    println("Error: $result")
+end
+
+"""
 function delete_all_embeddings(db_path::String)
     db = open_db(db_path)
     try
@@ -246,23 +305,95 @@ function delete_all_embeddings(db_path::String)
 end
 
 
-# TODO: doc string (public)
-function to_json_embedding(vec::AbstractVector{<:Number})
-    return JSON3.write(vec)
+
+"""
+Retrieve meta data from the SQLite database.
+
+This function is overloaded to accept either an active database connection or a file path:
+- `get_meta_data(db::SQLite.DB)`: Retrieves the meta data from the given open database connection.
+- `get_meta_data(db_path::String)`: Opens the database at the specified path, retrieves the meta data, and then closes the connection.
+
+# Arguments
+- For `get_meta_data(db::SQLite.DB)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+- For `get_meta_data(db_path::String)`:
+  - `db_path::String`: The file path to the SQLite database.
+
+# Returns
+- The first row of meta data as a named tuple if it exists, or `nothing` if no meta data is found.
+- If an error occurs (in the `db_path` overload), a `String` error message is returned.
+
+# Examples
+
+Using an existing database connection:
+```julia
+meta = get_meta_data(db)
+if meta !== nothing
+    println("Meta data: ", meta)
+else
+    println("No meta data available.")
 end
 
-# TODO: doc string (public)
+Using a database file path:
+
+result = get_meta_data("my_database.db")
+if result isa NamedTuple
+    println("Meta data: ", result)
+else
+    println("Error: ", result)
+end
+
+"""
+function get_meta_data(db::SQLite.DB)
+    stmt = "SELECT * FROM $META_DATA_TABLE_NAME"
+    rows = collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
+    if isempty(rows)
+        return nothing
+    else
+        return rows[1]
+    end
+end
+
+function get_meta_data(db_path::String)
+    db = open_db(db_path)
+    try
+        result = get_meta_data(db)
+        close_db(db)
+        return result
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+
+
+"""
+Infer the data type of the elements in a numeric embedding vector.
+
+# Arguments
+- `embedding::AbstractVector{<:Number}`: A vector containing numerical values.
+
+# Returns
+- A `String` representing the element type of the embedding.
+
+# Example
+```julia
+vec = [1.0, 2.0, 3.0]
+println(infer_data_type(vec))  # "Float64"
+
+"""
 function infer_data_type(embedding::AbstractVector{<:Number})
     return string(eltype(embedding))
 end
 
-#helper to convert an embedding vector to a binary blob:
+
 function embedding_to_blob(embedding::AbstractVector{<:Number})
     return Vector{UInt8}(reinterpret(UInt8, embedding))
 end
 
 
-# doc string private
+
 function update_meta(db::SQLite.DB, count::Int=1)
     rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
     
@@ -282,8 +413,47 @@ end
 
 
 
-# TODO: public doc string
-function insert_embedding(db::SQLite.DB, collection_name::String, id_input, embedding_input)
+"""
+Insert one or more embeddings into a specified collection in the SQLite database.
+
+This function is overloaded to support:
+- **Active Connection**: `insert_embeddings(db::SQLite.DB, collection_name::String, id_input, embedding_input)`
+- **Database Path**: `insert_embeddings(db_path::String, collection_name::String, id_input, embedding_input)`
+
+In both cases, the function validates that the provided embeddings have a consistent length and that their data type matches the meta information stored in the database. For the method accepting a database path, the connection is automatically opened and closed.
+
+# Arguments
+- `db::SQLite.DB` or `db_path::String`: Either an active SQLite database connection or the file path to the database.
+- `collection_name::String`: The name of the collection where the embeddings will be stored.
+- `id_input`: A single ID or an array of IDs corresponding to the embeddings.
+- `embedding_input`: A single numeric embedding vector or an array of embedding vectors. All embeddings must be of the same length.
+
+# Returns
+- `true` if the embeddings are successfully inserted.
+- A `String` error message if an error occurs.
+
+# Examples
+
+Using an active database connection:
+```julia
+result = insert_embeddings(db, "collection1", [1, 2], [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+if result === true
+    println("Embeddings inserted successfully.")
+else
+    println("Error: ", result)
+end
+
+Using a database file path:
+
+result = insert_embeddings("my_database.db", "collection1", 1, [0.1, 0.2, 0.3])
+if result === true
+    println("Embedding inserted successfully.")
+else
+    println("Error: ", result)
+end
+
+"""
+function insert_embeddings(db::SQLite.DB, collection_name::String, id_input, embedding_input)
     #if a single ID or embedding is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
     
@@ -341,11 +511,10 @@ function insert_embedding(db::SQLite.DB, collection_name::String, id_input, embe
     return true
 end
 
-# TODO: public doc string
-function insert_embedding(db_path::String, collection_name::String, id_input, embedding_input)
+function insert_embeddings(db_path::String, collection_name::String, id_input, embedding_input)
     db = open_db(db_path)
     try 
-        msg = insert_embedding(db, collection_name, id_input, embedding_input)
+        msg = insert_embeddings(db, collection_name, id_input, embedding_input)
         close_db(db)
         return msg
     catch e
@@ -356,9 +525,48 @@ end
 
 
 
+"""
+Delete one or more embeddings from the database using their ID(s).
 
-function delete_embedding(db::SQLite.DB, id_input)
-    # Normalize id_input: if a single ID is passed, wrap it in a one-element array.
+This function is overloaded to support both an active database connection and a database file path:
+- `delete_embeddings(db::SQLite.DB, id_input)`: Deletes embeddings using an open database connection.
+- `delete_embeddings(db_path::String, id_input)`: Opens the database at the specified path, deletes the embeddings, and then closes the connection.
+
+# Arguments
+- For `delete_embeddings(db::SQLite.DB, id_input)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+  - `id_input`: A single ID or a collection of IDs (can be any type convertible to a string) identifying the embeddings to be deleted.
+- For `delete_embeddings(db_path::String, id_input)`:
+  - `db_path::String`: The file path to the SQLite database.
+  - `id_input`: A single ID or a collection of IDs identifying the embeddings to be deleted.
+
+# Returns
+- `true` if the deletion is successful.
+- A `String` error message if an error occurs during deletion.
+
+# Examples
+
+Using an active database connection:
+```julia
+result = delete_embeddings(db, [1, 2, 3])
+if result === true
+    println("Embeddings deleted successfully.")
+else
+    println("Error: ", result)
+end
+
+Using a database file path:
+
+result = delete_embeddings("my_database.db", 1)
+if result === true
+    println("Embedding deleted successfully.")
+else
+    println("Error: ", result)
+end
+
+"""
+function delete_embeddings(db::SQLite.DB, id_input)
+    #if a single ID is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? map(string, id_input) : [string(id_input)]
     n = length(ids)
     if n == 0
@@ -379,11 +587,10 @@ function delete_embedding(db::SQLite.DB, id_input)
     return true
 end
 
-# Convenience wrapper: opens/closes the database given a file path.
-function delete_embedding(db_path::String, id_input)
+function delete_embeddings(db_path::String, id_input)
     db = open_db(db_path)
     try
-        result = delete_embedding(db, id_input)
+        result = delete_embeddings(db, id_input)
         close_db(db)
         return result
     catch e
@@ -395,8 +602,47 @@ end
 
 
 
-# TODO: public doc string
-function update_embedding(db::SQLite.DB, collection_name::String, id_input, new_embedding_input)
+"""
+Update one or more embeddings in the SQLite database with new embedding data.
+
+This function is overloaded to support two usage patterns:
+- `update_embeddings(db::SQLite.DB, collection_name::String, id_input, new_embedding_input)`: Updates embeddings using an active database connection.
+- `update_embeddings(db_path::String, id_input, new_embedding_input)`: Opens the database at the specified path, updates the embeddings, and then closes the connection.
+
+The function accepts a single identifier or an array of identifiers along with corresponding new embedding vectors. It validates that all new embeddings have the same length, and that their length and data type match the values stored in the meta table. For single record updates, it additionally confirms that the record exists in the database.
+
+# Arguments
+- `db::SQLite.DB` or `db_path::String`: Either an active database connection or the file path to the SQLite database.
+- `collection_name::String` (only for the connection overload): The name of the collection containing the embeddings.
+- `id_input`: A single ID or an array of IDs identifying the embeddings to update.
+- `new_embedding_input`: A single numeric embedding vector or an array of such vectors. All embeddings must be of consistent length.
+
+# Returns
+- `true` if the update is successful.
+- A `String` error message if an error occurs.
+
+# Examples
+
+Using an active database connection:
+```julia
+result = update_embeddings(db, "my_collection", 1, [0.5, 0.6, 0.7])
+if result === true
+    println("Embedding updated successfully.")
+else
+    println("Error: ", result)
+end
+
+Using a database file path:
+
+result = update_embeddings("my_database.db", [1, 2], [[0.5, 0.6, 0.7], [0.8, 0.9, 1.0]])
+if result === true
+    println("Embeddings updated successfully.")
+else
+    println("Error: ", result)
+end
+
+"""
+function update_embeddings(db::SQLite.DB, collection_name::String, id_input, new_embedding_input)
     #wrap a single ID or embedding into a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
     
@@ -424,7 +670,7 @@ function update_embedding(db::SQLite.DB, collection_name::String, id_input, new_
     #infer data type from the first new embedding
     local inferred_data_type = infer_data_type(new_embeddings[1])
 
-    # Retrieve meta table information using the Tables interface.
+    #get meta table information using the Tables interface
     meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
     if isempty(meta_rows)
         error("Meta table is empty. The meta row should have been initialized during database setup.")
@@ -462,11 +708,10 @@ function update_embedding(db::SQLite.DB, collection_name::String, id_input, new_
     return true
 end
 
-#TODO: public doc string
-function update_embedding(db_path::String, id_input, new_embedding_input)
+function update_embeddings(db_path::String, id_input, new_embedding_input)
     db = open_db(db_path)
     try
-        result = update_embedding(db, id_input, new_embedding_input)
+        result = update_embeddings(db, id_input, new_embedding_input)
         close_db(db)
         return result
     catch e
@@ -493,7 +738,6 @@ end
 
 #RETRIEVE
 
-#TODO: non-public docs
 function parse_data_type(dt::String) 
     T = get(DATA_TYPE_MAP, dt, nothing) 
     if T === nothing 
@@ -503,15 +747,54 @@ function parse_data_type(dt::String)
     return T 
 end
 
-#TODO: non-public docs
 function blob_to_embedding(blob::Vector{UInt8}, ::Type{T}) where T
     # reinterpret produces a view; use collect to obtain a standard Julia array.
     return collect(reinterpret(T, blob))
 end
 
 
-# TODO: public doc string
-function get_embedding(db::SQLite.DB, id_input)
+"""
+Retrieve one or more embeddings from the SQLite database by their ID(s).
+
+This function is overloaded to support:
+- `get_embeddings(db::SQLite.DB, id_input)`: Retrieves embeddings using an active database connection.
+- `get_embeddings(db_path::String, id_input)`: Opens the database at the specified path, retrieves embeddings, and then closes the connection.
+
+When a single ID is provided, the corresponding embedding vector is returned (or `nothing` if not found). When multiple IDs are provided, a dictionary mapping each ID (as a string) to its embedding vector is returned.
+
+# Arguments
+- For `get_embeddings(db::SQLite.DB, id_input)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+  - `id_input`: A single ID or an array of IDs identifying the embeddings to retrieve.
+- For `get_embeddings(db_path::String, id_input)`:
+  - `db_path::String`: The file path to the SQLite database.
+  - `id_input`: A single ID or an array of IDs identifying the embeddings to retrieve.
+
+# Returns
+- A single embedding vector if one ID is provided, or a dictionary mapping IDs (as strings) to embedding vectors if multiple IDs are provided.
+- Returns `nothing` if a single requested ID is not found.
+- A `String` error message if an error occurs during retrieval.
+
+# Examples
+
+Using an active database connection:
+```julia
+embedding = get_embeddings(db, 42)
+if embedding === nothing
+    println("Embedding not found.")
+else
+    println("Embedding: ", embedding)
+end
+
+Using a database file path:
+
+embeddings = get_embeddings("my_database.db", [1, 2, 3])
+for (id, emb) in embeddings
+    println("ID: $id, Embedding: ", emb)
+end
+
+"""
+function get_embeddings(db::SQLite.DB, id_input)
     #wrap a single ID into an array
     ids = id_input isa AbstractVector ? id_input : [id_input]
     n = length(ids)
@@ -553,11 +836,10 @@ function get_embedding(db::SQLite.DB, id_input)
     end
 end
 
-# TODO: public doc string
-function get_embedding(db_path::String, id_input)
+function get_embeddings(db_path::String, id_input)
     db = open_db(db_path)
     try
-        result = get_embedding(db, id_input)
+        result = get_embeddings(db, id_input)
         close_db(db)
         return result
     catch e
@@ -568,7 +850,28 @@ end
 
 
 
-# TODO: public doc string
+"""
+Randomly retrieve a specified number of embeddings from the SQLite database.
+
+This function is overloaded to support two usage patterns:
+- `random_embeddings(db::SQLite.DB, num::Int)`: Retrieves embeddings using an active database connection.
+- `random_embeddings(db_path::String, num::Int)`: Opens the database at the specified path, retrieves embeddings, and then closes the connection.
+
+# Arguments
+- `db::SQLite.DB` or `db_path::String`: Either an active SQLite database connection or the file path to the SQLite database.
+- `num::Int`: The number of random embeddings to retrieve.
+
+# Returns
+- A `Dict{String, Any}` mapping each embedding's ID (as a string) to its embedding vector.
+
+# Example
+```julia
+embeddings = random_embeddings("my_database.db", 5)
+for (id, emb) in embeddings
+    println("ID: $id, Embedding: ", emb)
+end
+
+""" 
 function random_embeddings(db::SQLite.DB, num::Int)
     # TODO: global stmt
     stmt = """
@@ -596,7 +899,6 @@ function random_embeddings(db::SQLite.DB, num::Int)
     return result
 end
 
-# TODO: public doc string
 function random_embeddings(db_path::String, num::Int)
     db = open_db(db_path)
     try
@@ -613,7 +915,51 @@ end
 
 
 
-#TODO: public doc string
+"""
+Retrieve the adjacent record relative to a given `current_id` from the SQLite database.
+
+This function is overloaded to support both an active database connection and a database file path:
+- `get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=true)`: Uses an active connection.
+- `get_adjacent_id(db_path::String, current_id; direction="next", full_row=true)`: Opens the database at the specified path, retrieves the adjacent record, and then closes the connection.
+
+The function returns the record immediately after (or before) the specified `current_id` based on the `direction` parameter. When `full_row` is `true`, the returned result is a named tuple containing the `id_text`, the decoded embedding vector, and the stored `data_type`. When `full_row` is `false`, only the `id_text` is returned.
+
+# Arguments
+- **For `get_adjacent_id(db::SQLite.DB, current_id; direction, full_row)`**:
+  - `db::SQLite.DB`: An active SQLite database connection.
+  - `current_id`: The current record's ID from which to find the adjacent record.
+  - `direction::String="next"`: The direction to search for the adjacent record. Use `"next"` for the record with an ID greater than `current_id`, or `"previous"` (or `"prev"`) for the record with an ID less than `current_id`.
+  - `full_row::Bool=true`: If `true`, return the full record (including embedding and meta data); if `false`, return only the `id_text`.
+
+- **For `get_adjacent_id(db_path::String, current_id; direction, full_row)`**:
+  - `db_path::String`: The file path to the SQLite database.
+  - Other parameters are as described above.
+
+# Returns
+- When `full_row` is `true`: A named tuple `(id_text, embedding, data_type)` representing the adjacent record.
+- When `full_row` is `false`: The adjacent record's `id_text`.
+- Returns `nothing` if no adjacent record is found.
+- For the `db_path` overload, a `String` error message is returned if an error occurs.
+
+# Example
+```julia
+# Using an active database connection:
+adjacent = get_adjacent_id(db, 100; direction="previous", full_row=false)
+if adjacent !== nothing
+    println("Adjacent ID: ", adjacent)
+else
+    println("No adjacent record found.")
+end
+
+# Using a database file path:
+result = get_adjacent_id("my_database.db", 100; direction="next")
+if result isa NamedTuple
+    println("Adjacent record: ", result)
+else
+    println("Error or record not found: ", result)
+end
+
+"""
 function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=true)
     
     if direction == "next"
@@ -654,7 +1000,7 @@ function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=t
     if !full_row
         return row.id_text
     else
-        # For full_row retrieval, obtain the stored data type from the meta table.
+        #full_row retrieval, obtain the stored data type from the meta table
         meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
         if isempty(meta_rows)
             error("Meta table is empty. The meta row should have been initialized during database setup.")
@@ -666,7 +1012,6 @@ function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=t
     end
 end
 
-#TODO: public doc string
 function get_adjacent_id(db_path::String, current_id; direction="next", full_row=true)
     db = open_db(db_path)
     try
@@ -682,14 +1027,35 @@ end
 
 
 
+"""
+Count the number of entries in the main table of the SQLite database.
 
+This function is overloaded to support both an active database connection and a database file path:
+- `count_entries(db::SQLite.DB; update_meta::Bool=false)`: Counts entries using an active database connection.
+- `count_entries(db_path::String; update_meta::Bool=false)`: Opens the database at the specified path, counts entries, optionally updates the meta table, and then closes the connection.
 
+# Arguments
+- For `count_entries(db::SQLite.DB; update_meta::Bool=false)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+- For `count_entries(db_path::String; update_meta::Bool=false)`:
+  - `db_path::String`: The file path to the SQLite database.
+- `update_meta::Bool=false`: When set to `true`, updates the meta table with the current count. If the count is 0, it clears the meta information (i.e., sets `embedding_count` to 0 and resets `embedding_length` if applicable).
 
+# Returns
+- The number of entries (an integer) in the main table.
+- In the `db_path` overload, returns a `String` error message if an error occurs.
 
+# Example
+```julia
+# Using an active database connection:
+entry_count = count_entries(db, update_meta=true)
+println("Number of entries: ", entry_count)
 
+# Using a database file path:
+entry_count = count_entries("my_database.db", update_meta=true)
+println("Number of entries: ", entry_count)
 
-
-#TODO: public doc string
+"""
 function count_entries(db::SQLite.DB; update_meta::Bool=false)
     stmt = "SELECT COUNT(*) AS count FROM $MAIN_TABLE_NAME"
     #the Tables interface for consistent row conversion
@@ -710,7 +1076,6 @@ function count_entries(db::SQLite.DB; update_meta::Bool=false)
     return count
 end
 
-#TODO: public doc string
 function count_entries(db_path::String; update_meta::Bool=false)
     db = open_db(db_path)
     try
@@ -725,30 +1090,6 @@ end
 
 
 
-
-#TODO: public doc string
-function get_meta_data(db::SQLite.DB)
-    stmt = "SELECT * FROM $META_DATA_TABLE_NAME"
-    rows = collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
-    if isempty(rows)
-        return nothing
-    else
-        return rows[1]
-    end
-end
-
-#TODO: public doc string
-function get_meta_data(db_path::String)
-    db = open_db(db_path)
-    try
-        result = get_meta_data(db)
-        close_db(db)
-        return result
-    catch e
-        close_db(db)
-        return "Error: $(e)"
-    end
-end
 
 
 
