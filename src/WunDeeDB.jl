@@ -5,7 +5,7 @@ using Tables, DBInterface
 using JSON3
 
 
-export get_supported_data_types, get_supported_endianness_types
+export get_supported_data_types, get_supported_endianness_types,
         initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
         get_meta_data,
         infer_data_type,
@@ -92,8 +92,9 @@ get_supported_endianness_types() -> Vector{String}
 Returns a sorted vector of supported endianness as strings.
 """
 function get_supported_endianness_types()::Vector{String}
-    return sort(collect(keys(ENDIANNESS_TYPES)))
+    return sort(ENDIANNESS_TYPES)
 end
+
 
 
 
@@ -417,14 +418,13 @@ end
 Insert one or more embeddings into a specified collection in the SQLite database.
 
 This function is overloaded to support:
-- **Active Connection**: `insert_embeddings(db::SQLite.DB, collection_name::String, id_input, embedding_input)`
-- **Database Path**: `insert_embeddings(db_path::String, collection_name::String, id_input, embedding_input)`
+- **Active Connection**: `insert_embeddings(db::SQLite.DB, id_input, embedding_input)`
+- **Database Path**: `insert_embeddings(db_path::String, id_input, embedding_input)`
 
 In both cases, the function validates that the provided embeddings have a consistent length and that their data type matches the meta information stored in the database. For the method accepting a database path, the connection is automatically opened and closed.
 
 # Arguments
 - `db::SQLite.DB` or `db_path::String`: Either an active SQLite database connection or the file path to the database.
-- `collection_name::String`: The name of the collection where the embeddings will be stored.
 - `id_input`: A single ID or an array of IDs corresponding to the embeddings.
 - `embedding_input`: A single numeric embedding vector or an array of embedding vectors. All embeddings must be of the same length.
 
@@ -436,7 +436,7 @@ In both cases, the function validates that the provided embeddings have a consis
 
 Using an active database connection:
 ```julia
-result = insert_embeddings(db, "collection1", [1, 2], [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+result = insert_embeddings(db, [1, 2], [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
 if result === true
     println("Embeddings inserted successfully.")
 else
@@ -445,7 +445,7 @@ end
 
 Using a database file path:
 
-result = insert_embeddings("my_database.db", "collection1", 1, [0.1, 0.2, 0.3])
+result = insert_embeddings("my_database.db", 1, [0.1, 0.2, 0.3])
 if result === true
     println("Embedding inserted successfully.")
 else
@@ -453,7 +453,7 @@ else
 end
 
 """
-function insert_embeddings(db::SQLite.DB, collection_name::String, id_input, embedding_input)
+function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
     #if a single ID or embedding is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
     
@@ -511,10 +511,10 @@ function insert_embeddings(db::SQLite.DB, collection_name::String, id_input, emb
     return true
 end
 
-function insert_embeddings(db_path::String, collection_name::String, id_input, embedding_input)
+function insert_embeddings(db_path::String, id_input, embedding_input)
     db = open_db(db_path)
     try 
-        msg = insert_embeddings(db, collection_name, id_input, embedding_input)
+        msg = insert_embeddings(db, id_input, embedding_input)
         close_db(db)
         return msg
     catch e
@@ -606,14 +606,13 @@ end
 Update one or more embeddings in the SQLite database with new embedding data.
 
 This function is overloaded to support two usage patterns:
-- `update_embeddings(db::SQLite.DB, collection_name::String, id_input, new_embedding_input)`: Updates embeddings using an active database connection.
+- `update_embeddings(db::SQLite.DB, id_input, new_embedding_input)`: Updates embeddings using an active database connection.
 - `update_embeddings(db_path::String, id_input, new_embedding_input)`: Opens the database at the specified path, updates the embeddings, and then closes the connection.
 
 The function accepts a single identifier or an array of identifiers along with corresponding new embedding vectors. It validates that all new embeddings have the same length, and that their length and data type match the values stored in the meta table. For single record updates, it additionally confirms that the record exists in the database.
 
 # Arguments
 - `db::SQLite.DB` or `db_path::String`: Either an active database connection or the file path to the SQLite database.
-- `collection_name::String` (only for the connection overload): The name of the collection containing the embeddings.
 - `id_input`: A single ID or an array of IDs identifying the embeddings to update.
 - `new_embedding_input`: A single numeric embedding vector or an array of such vectors. All embeddings must be of consistent length.
 
@@ -625,7 +624,7 @@ The function accepts a single identifier or an array of identifiers along with c
 
 Using an active database connection:
 ```julia
-result = update_embeddings(db, "my_collection", 1, [0.5, 0.6, 0.7])
+result = update_embeddings(db, 1, [0.5, 0.6, 0.7])
 if result === true
     println("Embedding updated successfully.")
 else
@@ -642,7 +641,7 @@ else
 end
 
 """
-function update_embeddings(db::SQLite.DB, collection_name::String, id_input, new_embedding_input)
+function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     #wrap a single ID or embedding into a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
     
