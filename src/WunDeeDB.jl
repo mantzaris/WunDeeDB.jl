@@ -1,27 +1,30 @@
 module WunDeeDB
 
-using SQLite, JSON3, Tables
+using SQLite
+using Tables, DBInterface
+using JSON3
 
-export initialize_db, 
-        open_db, close_db,
-        insert_embedding, bulk_insert_embedding, 
-        delete_embedding, bulk_delete_embedding, 
-        update_embedding, bulk_update_embedding,
-        get_embedding, bulk_get_embedding,
-        get_next_id, get_previous_id,
-        count_entries, get_embedding_size, random_embeddings
+
+export get_supported_data_types, get_supported_endianness_types,
+        initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
+        get_meta_data,
+        infer_data_type,
+        insert_embeddings,
+        delete_embeddings,
+        update_embeddings,
+        get_embeddings,
+        random_embeddings, 
+        get_adjacent_id,
+        count_entries
 
         
 
 ###################
 #TODO:
-#linear exact search for Retrieval
-#parallelize the to and from JSON for the embeddings on bulk?     params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
+#linear exact search for Retrieval (brute force)
+#IVF, HSNW
 ###################
 
-const BULK_LIMIT = 1000
-
-#TODO add Float8s, https://github.com/JuliaMath/Float8s.jl
 const DATA_TYPE_MAP = Dict(
     "Float16"  => Float16,
     "Float32"  => Float32,
@@ -39,8 +42,129 @@ const DATA_TYPE_MAP = Dict(
     "UInt128"  => UInt128
 )
 
+const ENDIANNESS_TYPES = ["small", "big"]
 
-# DB connection fns 
+const MAIN_TABLE_NAME = "Embeddings"
+const META_DATA_TABLE_NAME = "EmbeddingsMetaData"
+
+const CREATE_MAIN_TABLE_STMT = """
+        CREATE TABLE IF NOT EXISTS $(MAIN_TABLE_NAME) (
+            id_text TEXT PRIMARY KEY,
+            embedding_blob BLOB NOT NULL
+        )
+        """
+
+const CREATE_META_TABLE_STMT = """
+       CREATE TABLE IF NOT EXISTS $(META_DATA_TABLE_NAME) (
+	   embedding_count BIGINT,
+	   embedding_length INT,
+	   data_type TEXT NOT NULL,
+           endianness TEXT NOT NULL
+       )
+       """
+
+const DELETE_EMBEDDINGS_STMT = "DELETE FROM $(MAIN_TABLE_NAME)"
+
+const META_TABLE_FULL_ROW_INSERTION_STMT = """
+        INSERT INTO $(META_DATA_TABLE_NAME) (embedding_count, embedding_length, data_type, endianness)
+        VALUES (?, ?, ?, ?)
+        """
+
+const META_SELECT_ALL_QUERY = "SELECT * FROM $(META_DATA_TABLE_NAME)"
+const META_UPDATE_QUERY = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = ?"
+const META_RESET_STMT = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = 0"
+
+const INSERT_EMBEDDING_STMT = "INSERT INTO $MAIN_TABLE_NAME (id_text, embedding_blob) VALUES (?, ?)"
+
+
+"""
+get_supported_data_types() -> Vector{String}
+
+Returns a sorted vector of supported data type names as strings.
+"""
+function get_supported_data_types()::Vector{String}
+    return sort(collect(keys(DATA_TYPE_MAP)))
+end
+
+"""
+get_supported_endianness_types() -> Vector{String}
+
+Returns a sorted vector of supported endianness as strings.
+"""
+function get_supported_endianness_types()::Vector{String}
+    return sort(ENDIANNESS_TYPES)
+end
+
+
+
+
+"""
+Initialize a SQLite database by setting up the main and meta tables with appropriate configuration.
+
+# Arguments
+- `db_path::String`: Path to the SQLite database file.
+- `embedding_length::Int`: Length of the embedding vector. Must be 1 or greater.
+- `data_type::String`: Data type for the embeddings. Must be one of the supported types (use `get_supported_data_types()` to see valid options).
+- `endianness::String="small"`: Endianness setting. Must be one of the allowed types (see `get_supported_endianness_types()`).
+
+# Returns
+- `true` on successful initialization.
+- A `String` error message if any parameter is invalid or if an exception occurs during initialization.
+
+# Example
+```julia
+result = initialize_db("my_database.db", 128, "float32", endianness="little")
+if result === true
+    println("Database initialized successfully!")
+else
+    println("Initialization failed: $result")
+end
+
+"""
+function initialize_db(db_path::String, embedding_length::Int, data_type::String; endianness::String="small")
+
+    arg_support_string = ""
+
+    if !(data_type in keys(DATA_TYPE_MAP))
+        arg_support_string *= "Unsupported data_type, run get_supported_data_types() to get the supported types. "
+    end
+
+    if !( endianness in ENDIANNESS_TYPES )
+        arg_support_string *= "Unsupported endianness type, run get_supported_endianness_types() to get the supported. "
+    end
+
+    if embedding_length < 1
+        arg_support_string *= "Embedding_length must be 1 or greater. "
+    end
+
+    if length(arg_support_string) > 0
+        return arg_support_string
+    end
+
+    db = open_db(db_path)
+    
+    try
+        SQLite.execute(db, "PRAGMA journal_mode = WAL;")
+        SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
+
+        SQLite.execute(db, CREATE_MAIN_TABLE_STMT)
+        SQLite.execute(db, CREATE_META_TABLE_STMT)
+
+        rows = collect(SQLite.Query(db, META_SELECT_ALL_QUERY))
+
+        if isempty(rows) #if empty, insert initial meta information
+            #in initial stage set embedding_count to 0 because no embeddings have been added yet
+            SQLite.execute(db, META_TABLE_FULL_ROW_INSERTION_STMT, (0, embedding_length, data_type, endianness))
+        end
+
+        close_db(db)
+        return true
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
 
 """
 open_db(db_path::String) -> SQLite.DB
@@ -93,6 +217,7 @@ function open_db(db_path::String)
     return db
 end
 
+
 """ close_db(db::SQLite.DB)
 
 Close an open SQLite database connection.
@@ -114,74 +239,66 @@ function close_db(db::SQLite.DB)
 end
 
 
-# Initialization 
-
 """
-initialize_db(db_path::String, collection_name::String) -> String
-
-Initialize an SQLite database for storing embedding records and corresponding metadata.
-
-This function performs the following operations:
-1. Opens the SQLite database located at `db_path`.
-2. Configures the database for improved write performance by setting:
-   - `journal_mode` to `WAL` (Write-Ahead Logging).
-   - `synchronous` to `NORMAL`.
-3. Creates the main table for storing embeddings if it does not already exist. The table is named as specified by `collection_name` and includes:
-   - `id_text` (TEXT PRIMARY KEY): A unique identifier for each embedding record.
-   - `embedding_json` (TEXT NOT NULL): The JSON-encoded embedding vector.
-   - `data_type` (TEXT): A column to store information about the data type of the embedding.
-4. Creates a metadata table (named `\$(collection_name)_meta`) if it does not already exist. This table stores:
-   - `row_num` (BIGINT): The number of embedding records.
-   - `vector_length` (INT): The length of the embedding vectors.
-
-After performing these steps, the function closes the database connection. On successful initialization, it returns `"true"`.  
-If an error occurs during the process, the function ensures that the database is closed and returns an error message string.
+Delete the database file at the specified path.
 
 # Arguments
-- `db_path::String`: The file path to the SQLite database.
-- `collection_name::String`: The base name for the main collection table. The associated metadata table will be named as `\$(collection_name)_meta`.
+- `db_path::String`: The file path of the database to delete.
 
 # Returns
-- A `String`:
-  - `"true"` if the database is successfully initialized.
-  - A descriptive error message if an error occurs.
+- `true` if the file was successfully deleted.
+- A `String` error message if deletion fails or if the file does not exist.
 
 # Example
 ```julia
-result = initialize_db("mydatabase.sqlite", "embeddings")
-if result == "true"
-    println("Database initialized successfully.")
+result = delete_db("my_database.db")
+if result === true
+    println("Database deleted successfully.")
 else
-    println("Database initialization failed: ", result)
+    println("Error: $result")
 end
-"""
-function initialize_db(db_path::String, collection_name::String)
-    db = open_db(db_path)
 
+"""
+function delete_db(db_path::String)
+    if isfile(db_path)
+        try
+            rm(db_path)
+            return true
+        catch e
+            return "Error deleting DB: $(e)"
+        end
+    else
+        return "Database file does not exist."
+    end
+end
+
+"""
+Delete all embeddings from the database at the specified path and reset the embedding count.
+
+# Arguments
+- `db_path::String`: The file path of the SQLite database.
+
+# Returns
+- `true` if the operation is successful.
+- A `String` error message if an error occurs.
+
+# Example
+```julia
+result = delete_all_embeddings("my_database.db")
+if result === true
+    println("Embeddings deleted successfully.")
+else
+    println("Error: $result")
+end
+
+"""
+function delete_all_embeddings(db_path::String)
+    db = open_db(db_path)
     try
-        SQLite.execute(db, "PRAGMA journal_mode = WAL;")
-        SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
-
-        create_main_stmt = """
-        CREATE TABLE IF NOT EXISTS $collection_name (
-            id_text TEXT PRIMARY KEY,
-            embedding_json TEXT NOT NULL,
-            data_type TEXT
-        )
-        """
-        SQLite.execute(db, create_main_stmt)
-
-        #meta table
-        meta_stmt = """
-        CREATE TABLE IF NOT EXISTS $(collection_name)_meta (
-            row_num BIGINT,
-            vector_length INT
-        )
-        """
-        SQLite.execute(db, meta_stmt)
-
+        SQLite.execute(db, DELETE_EMBEDDINGS_STMT) #clear all embeddings
+        SQLite.execute(db, META_RESET_STMT) #reset the embedding count to 0
         close_db(db)
-        return "true"
+        return true
     catch e
         close_db(db)
         return "Error: $(e)"
@@ -190,206 +307,60 @@ end
 
 
 
-# Serialization Helpers
-function to_json_embedding(vec::AbstractVector{<:Number})
-    return JSON3.write(vec)
-end
-
-function infer_data_type(embedding::AbstractVector{<:Number}) 
-    elty = eltype(embedding)
-    return string(elty) 
-end
-
-
-
-# Meta Table Helpers
-function update_meta(db::SQLite.DB, meta_table::String, embedding_length::Int)
-    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
-    if isempty(rows)
-        stmt = """
-        INSERT INTO $(meta_table) (row_num, vector_length)
-        VALUES (?, ?)
-        """
-        SQLite.execute(db, stmt, (1, embedding_length))
-    else
-        row = rows[1]
-        old_row_num = row.row_num
-        old_vec_len = row.vector_length
-        new_row_num = old_row_num + 1
-        if old_vec_len != embedding_length
-            error("Vector length mismatch: existing=$(old_vec_len), new=$(embedding_length).")
-        end
-        stmt = "UPDATE $(meta_table) SET row_num = ?"
-        SQLite.execute(db, stmt, (new_row_num,))
-    end
-end
-
-
-# Bulk version: add `count` rows
-function update_meta_bulk(db::SQLite.DB, meta_table::String, embedding_length::Int, count::Int)
-    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    #use DBInterface.execute to obtain a result set that supports the Tables interface!!!!
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
-    if isempty(rows)
-        stmt = """
-        INSERT INTO $(meta_table) (row_num, vector_length)
-        VALUES (?, ?)
-        """
-        DBInterface.execute(db, stmt, (count, embedding_length))
-    else
-        row = rows[1]
-        old_row_num = row.row_num
-        old_vec_len = row.vector_length
-        if old_vec_len != embedding_length
-            error("Vector length mismatch in meta: existing=$old_vec_len, new=$embedding_length")
-        end
-        new_row_num = old_row_num + count
-        stmt = "UPDATE $(meta_table) SET row_num = ?"
-        DBInterface.execute(db, stmt, (new_row_num,))
-    end
-end
-
-
-
-
-#DELETE
-
-function update_meta_delete(db::SQLite.DB, meta_table::String)
-    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str))) #table interface!!! 
-    if isempty(rows)
-        return
-    end
-
-    row = rows[1]
-    old_row_num = row.row_num
-
-    old_vec_len = row.vector_length
-
-    new_row_num = max(old_row_num - 1, 0)
-
-    if new_row_num == 0
-        update_str = "UPDATE $(meta_table) SET row_num = 0, vector_length = NULL"
-        SQLite.execute(db, update_str)
-    else
-        update_str = "UPDATE $(meta_table) SET row_num = ?"
-        SQLite.execute(db, update_str, (new_row_num,))
-    end
-end
-
-# Bulk deletion meta update: subtract count from row_num.
-function bulk_update_meta_delete(db::SQLite.DB, meta_table::String, count::Int)
-    q_str = "SELECT row_num, vector_length FROM $(meta_table)"
-    # Use DBInterface.execute combined with Tables.namedtupleiterator
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, q_str)))
-    if isempty(rows)
-        return
-    end
-    row = rows[1]
-    old_row_num = row.row_num
-    new_row_num = max(old_row_num - count, 0)
-    if new_row_num == 0
-        stmt = "UPDATE $(meta_table) SET row_num = 0, vector_length = NULL"
-        DBInterface.execute(db, stmt)
-    else
-        stmt = "UPDATE $(meta_table) SET row_num = ?"
-        DBInterface.execute(db, stmt, (new_row_num,))
-    end
-end
-
-
 """
-insert_embedding(db::SQLite.DB, collection_name::String, id_text, embedding::AbstractVector{<:Number}; 
-                     data_type::Union{Nothing,String}=nothing) -> String
+Retrieve meta data from the SQLite database.
 
-Insert a single embedding record into the specified collection (table) within an SQLite database.
-
-This function performs the following steps:
-1. **Data Type Handling:**  
-   If `data_type` is not provided, it is inferred from the embedding using `infer_data_type(embedding)`.
-   
-2. **Embedding Conversion:**  
-   The embedding vector is converted to a JSON string using `to_json_embedding(embedding)`.
-
-3. **Atomic Insertion and Metadata Update:**  
-   The insertion of the record and the subsequent update of the associated metadata table (named `\$(collection_name)_meta`) are performed within a single SQLite transaction.  
-   The metadata is updated via `update_meta(db, "\$(collection_name)_meta", length(embedding))`, which records the dimension of the embedding.
+This function is overloaded to accept either an active database connection or a file path:
+- `get_meta_data(db::SQLite.DB)`: Retrieves the meta data from the given open database connection.
+- `get_meta_data(db_path::String)`: Opens the database at the specified path, retrieves the meta data, and then closes the connection.
 
 # Arguments
-- `db::SQLite.DB`: An active SQLite database connection.
-- `collection_name::String`: The name of the table where the embedding record is stored.
-- `id_text`: The unique identifier for the record (converted to a string for the query).
-- `embedding::AbstractVector{<:Number}`: The embedding vector to be inserted.
-- `data_type::Union{Nothing,String}=nothing`: Optional. A string specifying the data type of the embedding values. If not provided, the data type is inferred from the embedding.
+- For `get_meta_data(db::SQLite.DB)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+- For `get_meta_data(db_path::String)`:
+  - `db_path::String`: The file path to the SQLite database.
 
 # Returns
-- A `String` with the value `"true"` indicating a successful insertion.
+- The first row of meta data as a named tuple if it exists, or `nothing` if no meta data is found.
+- If an error occurs (in the `db_path` overload), a `String` error message is returned.
 
-# Example
+# Examples
+
+Using an existing database connection:
 ```julia
-db = SQLite.DB("mydatabase.sqlite")
-id = "record123"
-emb = [0.1, 0.2, 0.3, 0.4]
-result = insert_embedding(db, "embeddings", id, emb)
-println("Insert result: ", result)  # Expected output: "true"
-"""
-function insert_embedding(db::SQLite.DB, collection_name::String, id_text, embedding::AbstractVector{<:Number}; 
-    data_type::Union{Nothing,String}=nothing)
-    if data_type === nothing
-        data_type = infer_data_type(embedding)
-    end
-    emb_json = to_json_embedding(embedding)
-    #put both the insert and meta update in a transaction.
-    SQLite.transaction(db) do
-        stmt = """
-        INSERT INTO $collection_name (id_text, embedding_json, data_type)
-        VALUES (?, ?, ?)
-        """
-        SQLite.execute(db, stmt, (string(id_text), emb_json, data_type))
-        update_meta(db, "$(collection_name)_meta", length(embedding))
-    end
-    return "true"
-end
-
-""" 
-insert_embedding(db_path::String, collection_name::String, id_text, embedding::AbstractVector{<:Number}; data_type::Union{Nothing,String}=nothing) -> Union{String}
-
-A convenience wrapper for inserting a single embedding record into an SQLite database by specifying the database file path.
-
-This function:
-- Opens the SQLite database at the given db_path.
-- Delegates the record insertion to insert_embedding(db, collection_name, id_text, embedding; data_type=data_type).
-- Ensures that the database connection is closed after the operation.
-- Returns a descriptive error message if an exception occurs.
-
-# Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table where the embedding will be inserted.
-- id_text: The unique identifier for the record (converted to a string for the query).
-- embedding::AbstractVector{<:Number}: The embedding vector to be inserted.
-- data_type::Union{Nothing,String}=nothing: Optional. A string specifying the data type of the embedding values. If omitted, the data type is inferred from the embedding.
-
-# Returns
-- On success: A String with the value "true".
-- On error: A String containing a descriptive error message.
-
-# Example
-```julia
-result = insert_embedding("mydatabase.sqlite", "embeddings", "record123", [0.1, 0.2, 0.3, 0.4])
-if startswith(result, "Error:")
-    println("Insert failed: ", result)
+meta = get_meta_data(db)
+if meta !== nothing
+    println("Meta data: ", meta)
 else
-    println("Record inserted successfully.")
+    println("No meta data available.")
 end
+
+Using a database file path:
+
+result = get_meta_data("my_database.db")
+if result isa NamedTuple
+    println("Meta data: ", result)
+else
+    println("Error: ", result)
+end
+
 """
-function insert_embedding(db_path::String, collection_name::String, id_text, embedding::AbstractVector{<:Number}; 
-    data_type::Union{Nothing,String}=nothing)
+function get_meta_data(db::SQLite.DB)
+    stmt = "SELECT * FROM $META_DATA_TABLE_NAME"
+    rows = collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
+    if isempty(rows)
+        return nothing
+    else
+        return rows[1]
+    end
+end
+
+function get_meta_data(db_path::String)
     db = open_db(db_path)
-    try 
-        msg = insert_embedding(db, collection_name, id_text, embedding; data_type=data_type)
+    try
+        result = get_meta_data(db)
         close_db(db)
-        return msg
+        return result
     catch e
         close_db(db)
         return "Error: $(e)"
@@ -397,128 +368,153 @@ function insert_embedding(db_path::String, collection_name::String, id_text, emb
 end
 
 
+
 """
-bulk_insert_embedding(db::SQLite.DB, collection_name::String, 
-                            id_texts::Vector{<:AbstractString}, embeddings::Vector{<:AbstractVector{<:Number}};
-                            data_type::Union{Nothing,String}=nothing) -> String
-
-Bulk insert multiple embedding records into a specified collection (table) in an SQLite database.
-
-This function performs several validation and insertion steps:
-
-1. **Validation:**
-   - Checks that the number of identifiers (in `id_texts`) does not exceed a predefined limit (`BULK_LIMIT`).
-   - Verifies that the number of embedding vectors matches the number of IDs.
-   - Ensures that all embedding vectors have the same length.
-   - If `data_type` is not provided, it infers the data type from the first embedding vector using `infer_data_type`.
-
-2. **Parameter Preparation:**
-   - Constructs a list of tuples, each containing:
-     - The identifier (converted to a string).
-     - The JSON-encoded embedding vector (using `JSON3.write`).
-     - The determined `data_type`.
-
-3. **Insertion Transaction:**
-   - Executes an INSERT statement for each record within a single SQLite transaction.
-   - After all records are inserted, updates the associated metadata table (assumed to be named `\$(collection_name)_meta`) via `update_meta_bulk` to reflect the new embedding dimension and row count.
+Infer the data type of the elements in a numeric embedding vector.
 
 # Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table where embeddings are stored.
-- `id_texts::Vector{<:AbstractString}`: A vector of identifier strings for the new records.
-- `embeddings::Vector{<:AbstractVector{<:Number}}`: A vector of embedding vectors to be inserted. All embeddings must be of the same length.
-- `data_type::Union{Nothing, String}=nothing`: Optional. A string representing the data type of the embedding values. If omitted, the data type is inferred from the first embedding.
+- `embedding::AbstractVector{<:Number}`: A vector containing numerical values.
 
 # Returns
-- A `String` with the value `"true"` if the bulk insertion is successful.
-
-# Raises
-- An error if the number of identifiers exceeds `BULK_LIMIT`.
-- An error if the number of embeddings does not match the number of IDs.
-- An error if the embedding vectors do not all have the same length.
+- A `String` representing the element type of the embedding.
 
 # Example
 ```julia
-db = SQLite.DB("mydatabase.sqlite")
-ids = ["id1", "id2", "id3"]
-embs = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
-result = bulk_insert_embedding(db, "embeddings", ids, embs)
-println("Bulk insert result: ", result)
-"""
-function bulk_insert_embedding(db::SQLite.DB, collection_name::String, 
-    id_texts::Vector{<:AbstractString}, embeddings::Vector{<:AbstractVector{<:Number}};
-    data_type::Union{Nothing,String}=nothing)
+vec = [1.0, 2.0, 3.0]
+println(infer_data_type(vec))  # "Float64"
 
-    n = length(id_texts)
-    if n > BULK_LIMIT
-        error("Bulk insert limit exceeded: $n > $BULK_LIMIT")
+"""
+function infer_data_type(embedding::AbstractVector{<:Number})
+    return string(eltype(embedding))
+end
+
+
+function embedding_to_blob(embedding::AbstractVector{<:Number})
+    return Vector{UInt8}(reinterpret(UInt8, embedding))
+end
+
+
+
+function update_meta(db::SQLite.DB, count::Int=1)
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    
+    if isempty(rows)
+        error("Meta data table is empty. The meta row should have been initialized during database setup.")
+    else
+        row = rows[1]
+        current_count = row.embedding_count
+        new_count = current_count + count
+        
+        SQLite.execute(db, META_UPDATE_QUERY, (new_count,))
     end
-    if length(embeddings) != n
+end
+
+
+
+
+
+
+"""
+Insert one or more embeddings into a specified collection in the SQLite database.
+
+This function is overloaded to support:
+- **Active Connection**: `insert_embeddings(db::SQLite.DB, id_input, embedding_input)`
+- **Database Path**: `insert_embeddings(db_path::String, id_input, embedding_input)`
+
+In both cases, the function validates that the provided embeddings have a consistent length and that their data type matches the meta information stored in the database. For the method accepting a database path, the connection is automatically opened and closed.
+
+# Arguments
+- `db::SQLite.DB` or `db_path::String`: Either an active SQLite database connection or the file path to the database.
+- `id_input`: A single ID or an array of IDs corresponding to the embeddings.
+- `embedding_input`: A single numeric embedding vector or an array of embedding vectors. All embeddings must be of the same length.
+
+# Returns
+- `true` if the embeddings are successfully inserted.
+- A `String` error message if an error occurs.
+
+# Examples
+
+Using an active database connection:
+```julia
+result = insert_embeddings(db, [1, 2], [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+if result === true
+    println("Embeddings inserted successfully.")
+else
+    println("Error: ", result)
+end
+
+Using a database file path:
+
+result = insert_embeddings("my_database.db", 1, [0.1, 0.2, 0.3])
+if result === true
+    println("Embedding inserted successfully.")
+else
+    println("Error: ", result)
+end
+
+"""
+function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
+    #if a single ID or embedding is passed, wrap it in a one-element array
+    ids = id_input isa AbstractVector ? id_input : [id_input]
+    
+    embeddings = if embedding_input isa AbstractVector{<:Number} && !(embedding_input isa AbstractVector{<:AbstractVector})
+        [embedding_input]
+    elseif embedding_input isa AbstractVector{<:AbstractVector}
+        embedding_input
+    else
+        error("Invalid type for embedding_input.")
+    end
+
+    n = length(ids)
+    if n != length(embeddings)
         error("Mismatch between number of IDs and embeddings")
     end
 
-    embedding_length = length(embeddings[1])
+    #see all embeddings have the same length.
+    emb_length = length(embeddings[1])
     for e in embeddings
-        if length(e) != embedding_length
+        if length(e) != emb_length
             error("All embeddings must have the same length")
         end
     end
 
-    if data_type === nothing
-        data_type = infer_data_type(embeddings[1])
+    local inferred_data_type = infer_data_type(embeddings[1]) #see data type from the first embedding
+
+    #retrieve meta table information using DBInterface.execute with Tables.namedtupleiterator
+    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    
+    if isempty(meta_rows)
+        error("Meta table is empty. The meta row should have been initialized during database setup.")
+    end
+    
+    meta = meta_rows[1]
+    
+    if meta.embedding_length != emb_length
+        error("Embedding length mismatch: meta table has embedding_length=$(meta.embedding_length) but new embeddings have length=$(emb_length)")
+    end
+    if meta.data_type != inferred_data_type
+        error("Data type mismatch: meta table has data_type=$(meta.data_type) but new embeddings are of type=$(inferred_data_type)")
     end
 
-    #build parameters for each row
-    params = [(string(id_texts[i]), JSON3.write(embeddings[i]), data_type) for i in 1:n]
+    #get the embedding blob by build the db parameters for each row
+    params = [(string(ids[i]), embedding_to_blob(embeddings[i])) for i in 1:n]
 
+    #embedding insertion and meta update within a transaction.
     SQLite.transaction(db) do
-        stmt = """
-        INSERT INTO $collection_name (id_text, embedding_json, data_type)
-        VALUES (?, ?, ?)
-        """
-        #TODO improve?..
-        #INSERTiING EACH ROW INDEPENDENTLY
         for p in params
-            SQLite.execute(db, stmt, p)
+            SQLite.execute(db, INSERT_EMBEDDING_STMT, p)
         end
-        update_meta_bulk(db, "$(collection_name)_meta", embedding_length, n)
+        # Update the meta table by incrementing embedding_count by n.
+        update_meta(db, count=n)
     end
-    return "true"
+
+    return true
 end
 
-""" 
-bulk_insert_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString}, embeddings::Vector{<:AbstractVector{<:Number}}; data_type::Union{Nothing,String}=nothing) -> Union{String}
-
-A convenience wrapper for bulk inserting embedding records into an SQLite database using a database file path.
-
-This function opens the SQLite database located at db_path, calls the primary bulk_insert_embedding to insert the specified records into the given collection (table), and ensures that the database connection is closed. If an error occurs during the insertion process, a descriptive error message is returned.
-
-    # Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table where embeddings will be inserted.
-- id_texts::Vector{<:AbstractString}: A vector of identifier strings for the new records.
-- embeddings::Vector{<:AbstractVector{<:Number}}: A vector of embedding vectors to be inserted. All embeddings must have the same length.
-- data_type::Union{Nothing, String}=nothing: Optional. A string representing the data type of the embedding values. If omitted, it is inferred from the first embedding.
-
-# Returns
-- On success: A String with the value "true".
-- On error: A String containing a descriptive error message.
-
-# Example
-```julia
-result = bulk_insert_embedding("mydatabase.sqlite", "embeddings", ["id1", "id2"], [[1.0, 2.0], [3.0, 4.0]])
-if startswith(result, "Error:")
-    println("Bulk insert failed: ", result)
-else
-    println("Bulk insert successful: ", result)
-end
-"""
-function bulk_insert_embedding(db_path::String, collection_name::String, 
-    id_texts::Vector{<:AbstractString}, embeddings::Vector{<:AbstractVector{<:Number}};
-    data_type::Union{Nothing,String}=nothing)
+function insert_embeddings(db_path::String, id_input, embedding_input)
     db = open_db(db_path)
-    try
-        msg = bulk_insert_embedding(db, collection_name, id_texts, embeddings; data_type=data_type)
+    try 
+        msg = insert_embeddings(db, id_input, embedding_input)
         close_db(db)
         return msg
     catch e
@@ -528,187 +524,75 @@ function bulk_insert_embedding(db_path::String, collection_name::String,
 end
 
 
+
 """
-delete_embedding(db::SQLite.DB, collection_name::String, id_text) -> String
+Delete one or more embeddings from the database using their ID(s).
 
-Delete a single embedding record from the specified collection (table) in an SQLite database.
-
-This function performs the following steps within a single SQLite transaction:
-
-1. **Record Existence Check:**  
-   It verifies that a record with the specified `id_text` exists in the table `collection_name` by executing a SELECT query.  
-   If no matching record is found, an error with the message `"notfound"` is raised.
-
-2. **Deletion:**  
-   If the record exists, the function deletes the corresponding row from the table using a DELETE SQL command.
-
-3. **Metadata Update:**  
-   After deleting the record, it calls `update_meta_delete` on the associated metadata table (assumed to be named `\$(collection_name)_meta`) to update any metadata related to the deletion.
+This function is overloaded to support both an active database connection and a database file path:
+- `delete_embeddings(db::SQLite.DB, id_input)`: Deletes embeddings using an open database connection.
+- `delete_embeddings(db_path::String, id_input)`: Opens the database at the specified path, deletes the embeddings, and then closes the connection.
 
 # Arguments
-- `db::SQLite.DB`: An active SQLite database connection.
-- `collection_name::String`: The name of the table from which the embedding record should be deleted.
-- `id_text`: The identifier of the record to delete (this value is converted to a string for SQL operations).
+- For `delete_embeddings(db::SQLite.DB, id_input)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+  - `id_input`: A single ID or a collection of IDs (can be any type convertible to a string) identifying the embeddings to be deleted.
+- For `delete_embeddings(db_path::String, id_input)`:
+  - `db_path::String`: The file path to the SQLite database.
+  - `id_input`: A single ID or a collection of IDs identifying the embeddings to be deleted.
 
 # Returns
-- A `String` with the value `"true"` if the deletion (and metadata update) is successful.
+- `true` if the deletion is successful.
+- A `String` error message if an error occurs during deletion.
 
-# Raises
-- An error with the message `"notfound"` if no record with the specified `id_text` exists.
+# Examples
 
-# Example
+Using an active database connection:
 ```julia
-db = SQLite.DB("mydatabase.sqlite")
-result = delete_embedding(db, "embeddings", "record123")
-if result == "true"
-    println("Record deleted successfully.")
+result = delete_embeddings(db, [1, 2, 3])
+if result === true
+    println("Embeddings deleted successfully.")
 else
-    println("Deletion error: ", result)
-end
-"""
-function delete_embedding(db::SQLite.DB, collection_name::String, id_text)
-    SQLite.transaction(db) do
-        check_sql = """
-        SELECT 1 AS found FROM $(collection_name) WHERE id_text = ?
-        """
-        #use DBInterface.execute with Tables.namedtupleiterator for consistent row conversion
-        found_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(id_text),))))
-        if isempty(found_rows)
-            error("notfound")
-        end
-
-        delete_sql = """
-        DELETE FROM $(collection_name)
-        WHERE id_text = ?
-        """
-        SQLite.execute(db, delete_sql, (string(id_text),))
-        
-        update_meta_delete(db, "$(collection_name)_meta")
-    end
-    return "true"
+    println("Error: ", result)
 end
 
-""" 
-delete_embedding(db_path::String, collection_name::String, id_text) -> Union{String}
+Using a database file path:
 
-A convenience wrapper for deleting a single embedding record from an SQLite database by specifying the database file path.
-
-This function opens the SQLite database at db_path, calls the primary delete_embedding function to delete the specified record, and then ensures that the database connection is properly closed. If an error occurs during deletion, a descriptive error message is returned as a String.
-
-# Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table from which the record is to be deleted.
-- id_text: The identifier of the record to delete (converted to a string for SQL operations).
-
-# Returns
-- On success: A String with the value "true" indicating the record was successfully deleted.
-- On error: A String containing a descriptive error message.
-
-# Example
-```julia
-result = delete_embedding("mydatabase.sqlite", "embeddings", "record123")
-if startswith(result, "Error:")
-    println("Deletion failed: ", result)
+result = delete_embeddings("my_database.db", 1)
+if result === true
+    println("Embedding deleted successfully.")
 else
-    println("Record deleted successfully.")
-end
-"""
-function delete_embedding(db_path::String, collection_name::String, id_text)
-    db = open_db(db_path)
-    try
-        msg = delete_embedding(db, collection_name, id_text)
-        close_db(db)
-        return msg
-    catch e
-        close_db(db)
-        return "Error: $(e)"
-    end
+    println("Error: ", result)
 end
 
-
 """
-bulk_delete_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString}) -> String
-
-Delete multiple embedding records from the specified collection (table) in an SQLite database.
-
-This function removes rows from the table named `collection_name` where the `id_text` is one of the provided identifiers.
-It enforces a limit on the number of identifiers via the predefined constant `BULK_LIMIT` to prevent overly large transactions.
-If the number of identifiers exceeds `BULK_LIMIT`, an error is raised.
-
-The deletion process is executed within an SQLite transaction to ensure atomicity. After the deletion, the function updates the
-associated metadata table (assumed to be named `\$(collection_name)_meta`) by calling `bulk_update_meta_delete`, which subtracts the
-number of deleted rows from the stored metadata.
-
-# Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table from which embeddings are to be deleted.
-- `id_texts::Vector{<:AbstractString}`: A vector of identifier strings corresponding to the rows to delete.
-
-# Returns
-- A `String` with the value `"true"` if the deletion is successful.
-
-# Raises
-- An error if the number of identifiers exceeds `BULK_LIMIT`.
-- Any SQL errors encountered during the deletion or metadata update will propagate, causing the transaction to roll back.
-
-# Example
-```julia
-db = SQLite.DB("mydatabase.sqlite")
-ids = ["id1", "id2", "id3"]
-result = bulk_delete_embedding(db, "embeddings", ids)
-println(result)  # Should print "true" if the deletion and metadata update are successful.
-
-"""
-function bulk_delete_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString})
-    n = length(id_texts)
-    if n > BULK_LIMIT
-        error("Bulk delete limit exceeded: $n > $BULK_LIMIT")
+function delete_embeddings(db::SQLite.DB, id_input)
+    #if a single ID is passed, wrap it in a one-element array
+    ids = id_input isa AbstractVector ? map(string, id_input) : [string(id_input)]
+    n = length(ids)
+    if n == 0
+        error("No IDs provided for deletion.")
     end
+
     SQLite.transaction(db) do
-        #build a string of comma‐separated placeholders
+        #build comma-separated placeholders based on the number of IDs
         placeholders = join(fill("?", n), ", ")
-        stmt = "DELETE FROM $collection_name WHERE id_text IN ($placeholders)"
-        #convert each id_text to a string and pack them into a tuple
-        params = Tuple(string.(id_texts))
+        stmt = "DELETE FROM $MAIN_TABLE_NAME WHERE id_text IN ($placeholders)"
+        params = Tuple(ids)
         SQLite.execute(db, stmt, params)
         
-        #update the meta table to subtract the deleted rows
-        bulk_update_meta_delete(db, "$(collection_name)_meta", n)
+        #update the meta table for bulk deletion, this function should subtract 'n' from the meta embedding_count
+        update_meta(db, -n)
     end
-    return "true"
+
+    return true
 end
 
-""" 
-bulk_delete_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString}) -> Union{String}
-
-A convenience wrapper for deleting multiple embedding records from an SQLite database using a database file path.
-
-This function opens the SQLite database located at db_path, calls the primary bulk_delete_embedding function to remove the specified rows from the given collection (table), and then ensures that the database connection is properly closed. If an error occurs during the deletion or metadata update, a descriptive error message is returned as a String.
-
-# Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table from which embeddings are to be deleted.
-- id_texts::Vector{<:AbstractString}: A vector of identifier strings corresponding to the rows to delete.
-
-# Returns
-- On success: A String with the value "true" indicating the deletion was successful.
-- On error: A String containing a descriptive error message.
-
-# Example
-```juila
-result = bulk_delete_embedding("mydatabase.sqlite", "embeddings", ["id1", "id2", "id3"])
-if startswith(result, "Error:")
-    println("Bulk delete failed: ", result)
-else
-    println("Bulk delete successful: ", result)
-end
-"""
-function bulk_delete_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString})
+function delete_embeddings(db_path::String, id_input)
     db = open_db(db_path)
     try
-        msg = bulk_delete_embedding(db, collection_name, id_texts)
+        result = delete_embeddings(db, id_input)
         close_db(db)
-        return msg
+        return result
     catch e
         close_db(db)
         return "Error: $(e)"
@@ -718,267 +602,141 @@ end
 
 
 
-#UPDATE
-
 """
-update_embedding(db::SQLite.DB, collection_name::String, id_text, new_embedding::AbstractVector{<:Number};
-                     data_type::Union{Nothing,String}=nothing) -> String
+Update one or more embeddings in the SQLite database with new embedding data.
 
-Update the embedding vector for a specified record in the given collection (table) within an SQLite database.
+This function is overloaded to support two usage patterns:
+- `update_embeddings(db::SQLite.DB, id_input, new_embedding_input)`: Updates embeddings using an active database connection.
+- `update_embeddings(db_path::String, id_input, new_embedding_input)`: Opens the database at the specified path, updates the embeddings, and then closes the connection.
 
-This function performs several key steps within a single SQLite transaction:
-1. **Record Existence Check:**  
-   It first verifies that a record with the given `id_text` exists in the table `collection_name`.  
-   If no record is found, the function raises an error with the message `"notfound"`.
-
-2. **Metadata Retrieval and Dimension Validation:**  
-   The function retrieves metadata from the associated metadata table (named as `\$(collection_name)_meta`) to obtain the stored embedding vector length (`vector_length`).  
-   If the metadata is missing, an error is raised indicating that no metadata was found.  
-   It then compares the stored length with the length of the new embedding vector (`new_embedding`).  
-   If the lengths do not match, an error is raised with details about the mismatch.
-
-3. **Embedding Conversion and Data Type Determination:**  
-   The new embedding vector is converted to a JSON string using `to_json_embedding`.  
-   If the optional `data_type` parameter is not provided, it is inferred from the new embedding using `infer_data_type`.
-
-4. **Record Update:**  
-   Finally, the function updates the record in the table `collection_name` by setting the `embedding_json` and `data_type` fields for the row where `id_text` matches the provided identifier.
+The function accepts a single identifier or an array of identifiers along with corresponding new embedding vectors. It validates that all new embeddings have the same length, and that their length and data type match the values stored in the meta table. For single record updates, it additionally confirms that the record exists in the database.
 
 # Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table containing the embeddings.
-- `id_text`: The identifier of the record to update (converted to a string for the query).
-- `new_embedding::AbstractVector{<:Number}`: The new embedding vector to be stored.
-- `data_type::Union{Nothing, String}=nothing`: Optional. A string representing the data type of the embedding values. If not provided, the data type is inferred from `new_embedding`.
+- `db::SQLite.DB` or `db_path::String`: Either an active database connection or the file path to the SQLite database.
+- `id_input`: A single ID or an array of IDs identifying the embeddings to update.
+- `new_embedding_input`: A single numeric embedding vector or an array of such vectors. All embeddings must be of consistent length.
 
 # Returns
-- A `String` with the value `"true"` indicating a successful update.
+- `true` if the update is successful.
+- A `String` error message if an error occurs.
 
-# Raises
-- `"notfound"`: If no record with the specified `id_text` exists in `collection_name`.
-- An error if no metadata is found in the associated metadata table.
-- An error if the new embedding's length does not match the stored `vector_length`.
+# Examples
 
-# Example
+Using an active database connection:
 ```julia
-db = SQLite.DB("mydatabase.sqlite")
-id = "record123"
-new_vec = [0.1, 0.2, 0.3, 0.4]
-result = update_embedding(db, "embeddings", id, new_vec)
-if result == "true"
+result = update_embeddings(db, 1, [0.5, 0.6, 0.7])
+if result === true
     println("Embedding updated successfully.")
 else
-    println("Update failed: ", result)
-end
-"""
-function update_embedding(db::SQLite.DB, collection_name::String, id_text, new_embedding::AbstractVector{<:Number};
-    data_type::Union{Nothing,String}=nothing)
-    SQLite.transaction(db) do
-        #check that the record exists
-        check_sql = """
-        SELECT 1 AS found FROM $(collection_name) WHERE id_text = ?
-        """
-        rows_found = collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(id_text),))))
-        if isempty(rows_found)
-            error("notfound")
-        end
-
-        #retrieve metadata to validate the embedding dimension
-        meta_table = "$(collection_name)_meta"
-        meta_sql = "SELECT vector_length FROM $(meta_table)"
-        meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, meta_sql)))
-        if isempty(meta_rows)
-            error("No metadata found in $(meta_table); can't validate dimension.")
-        end
-
-        stored_length = meta_rows[1].vector_length
-        new_length = length(new_embedding)
-        if stored_length != new_length
-            error("Vector length mismatch: stored=$(stored_length), new=$(new_length)")
-        end
-
-        #convert the new embedding to JSON
-        emb_json = to_json_embedding(new_embedding)
-        if data_type === nothing
-            data_type = infer_data_type(new_embedding)
-        end
-
-        #update the record
-        update_sql = """
-        UPDATE $(collection_name)
-        SET embedding_json = ?, data_type = ?
-        WHERE id_text = ?
-        """
-        DBInterface.execute(db, update_sql, (emb_json, data_type, string(id_text)))
-    end
-    return "true"
+    println("Error: ", result)
 end
 
-""" 
-update_embedding(db_path::String, collection_name::String, id_text, new_embedding::AbstractVector{<:Number}; data_type::Union{Nothing,String}=nothing) -> Union{String}
+Using a database file path:
 
-A convenience wrapper for updating an embedding vector using a database file path.
-
-This function opens the SQLite database specified by db_path and then calls the primary update_embedding function to update the embedding for the specified record in the collection (table). It ensures that the database connection is properly closed after the operation. If an error occurs during the update, a descriptive error message is returned as a String.
-
-# Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table containing the embeddings.
-- id_text: The identifier of the record to update.
-- new_embedding::AbstractVector{<:Number}: The new embedding vector to be stored.
-- data_type::Union{Nothing, String}=nothing: Optional. A string representing the data type of the embedding values. If omitted, it is inferred from new_embedding.
-
-# Returns
-- On success: A String with the value "true".
-- On error: A String containing a descriptive error message.
-
-# Example
-```julia
-result = update_embedding("mydatabase.sqlite", "embeddings", "record123", [0.1, 0.2, 0.3, 0.4])
-if startswith(result, "Error:")
-    println("Update failed: ", result)
+result = update_embeddings("my_database.db", [1, 2], [[0.5, 0.6, 0.7], [0.8, 0.9, 1.0]])
+if result === true
+    println("Embeddings updated successfully.")
 else
-    println("Embedding updated successfully.")
-end
-"""
-function update_embedding(db_path::String, collection_name::String, id_text, new_embedding::AbstractVector{<:Number};
-    data_type::Union{Nothing,String}=nothing)
-    db = open_db(db_path)
-    try
-        msg = update_embedding(db, collection_name, id_text, new_embedding; data_type=data_type)
-        close_db(db)
-        return msg
-    catch e
-        close_db(db)
-        return "Error: $(e)"
-    end
+    println("Error: ", result)
 end
 
-
-
 """
-bulk_update_embedding(db::SQLite.DB, collection_name::String, 
-        id_texts::Vector{<:AbstractString}, new_embeddings::Vector{<:AbstractVector{<:Number}};
-        data_type::Union{Nothing,String}=nothing) -> String
-
-Perform a bulk update of embedding vectors in the specified collection (table) within an SQLite database.
-
-This function updates multiple rows at once by setting a new embedding (stored as a JSON string) and updating the
-data type for each specified identifier in `id_texts`. The function verifies that:
-  - The number of identifiers does not exceed a predefined bulk limit (`BULK_LIMIT`).
-  - The number of new embedding vectors matches the number of identifiers.
-  - All provided embedding vectors have the same length.
-
-If the optional `data_type` is not provided, it is inferred from the first embedding vector using `infer_data_type`.
-
-The updates are executed within a single SQLite transaction to ensure atomicity. For each identifier, the function:
-  - Converts the corresponding embedding vector to a JSON string using `to_json_embedding`.
-  - Executes an UPDATE statement to set `embedding_json` and `data_type` for the row where `id_text` matches the identifier.
-
-# Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table containing the embeddings.
-- `id_texts::Vector{<:AbstractString}`: A vector of identifier strings corresponding to the rows to update.
-- `new_embeddings::Vector{<:AbstractVector{<:Number}}`: A vector of new embedding vectors. Every embedding must be of the same length.
-- `data_type::Union{Nothing, String}=nothing`: Optional. A string representing the data type of the embeddings. If omitted, the data type is inferred from the first embedding.
-
-# Returns
-- A `String` ("true") if the update is successful.
-
-# Raises
-- An error if:
-  - The number of identifiers exceeds `BULK_LIMIT`.
-  - There is a mismatch between the number of identifiers and the number of new embeddings.
-  - The provided embedding vectors do not all have the same length.
-
-# Example
-```julia
-db = SQLite.DB("mydatabase.sqlite")
-ids = ["id1", "id2", "id3"]
-new_embs = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
-result = bulk_update_embedding(db, "embeddings", ids, new_embs)
-println("Bulk update result: ", result)
-"""
-function bulk_update_embedding(db::SQLite.DB, collection_name::String, 
-    id_texts::Vector{<:AbstractString}, new_embeddings::Vector{<:AbstractVector{<:Number}};
-    data_type::Union{Nothing,String}=nothing)
-
-    n = length(id_texts)
-    if n > BULK_LIMIT
-        error("Bulk update limit exceeded: $n > $BULK_LIMIT")
+function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
+    #wrap a single ID or embedding into a one-element array
+    ids = id_input isa AbstractVector ? id_input : [id_input]
+    
+    new_embeddings = if new_embedding_input isa AbstractVector{<:Number} && !(new_embedding_input isa AbstractVector{<:AbstractVector})
+        [new_embedding_input]
+    elseif new_embedding_input isa AbstractVector{<:AbstractVector}
+        new_embedding_input
+    else
+        error("Invalid type for new_embedding_input.")
     end
-    if length(new_embeddings) != n
-        error("Mismatch between number of IDs and new embeddings")
+
+    n = length(ids)
+    if n != length(new_embeddings)
+        error("Mismatch between number of IDs and new embeddings.")
     end
-    embedding_length = length(new_embeddings[1])
-    for e in new_embeddings
-        if length(e) != embedding_length
-            error("All embeddings must have the same length")
+
+    #ensure all new embeddings have the same length
+    new_emb_length = length(new_embeddings[1])
+    for emb in new_embeddings
+        if length(emb) != new_emb_length
+            error("All new embeddings must have the same length.")
         end
     end
-    if data_type === nothing
-        data_type = infer_data_type(new_embeddings[1])
+
+    #infer data type from the first new embedding
+    local inferred_data_type = infer_data_type(new_embeddings[1])
+
+    #get meta table information using the Tables interface
+    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    if isempty(meta_rows)
+        error("Meta table is empty. The meta row should have been initialized during database setup.")
+    end
+    meta = meta_rows[1]
+    
+    #new embedding dimensions and data_type also match the meta table?
+    if meta.embedding_length != new_emb_length
+        error("Embedding length mismatch: meta table has embedding_length=$(meta.embedding_length) but new embeddings have length=$(new_emb_length).")
+    end
+    if meta.data_type != inferred_data_type
+        error("Data type mismatch: meta table has data_type=$(meta.data_type) but new embeddings are of type=$(inferred_data_type).")
     end
 
+    #single update: check that the record exists
+    if n == 1
+        check_sql = "SELECT 1 AS found FROM $MAIN_TABLE_NAME WHERE id_text = ?" # TODO: make global constant
+        found_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(ids[1]),))))
+        if isempty(found_rows)
+            error("Record with id $(ids[1]) not found.")
+        end
+    end
+
+    #the update statement (using binary blobs)
+    local update_stmt = "UPDATE $MAIN_TABLE_NAME SET embedding_blob = ? WHERE id_text = ?" # TODO: make global constant
+    
+    #execute all updates within a transactio
     SQLite.transaction(db) do
-        stmt = """
-        UPDATE $(collection_name)
-        SET embedding_json = ?, data_type = ?
-        WHERE id_text = ?
-        """
         for i in 1:n
-            emb_json = to_json_embedding(new_embeddings[i])
-            SQLite.execute(db, stmt, (emb_json, data_type, string(id_texts[i])))
+            local blob = embedding_to_blob(new_embeddings[i])
+            SQLite.execute(db, update_stmt, (blob, string(ids[i])))
         end
     end
-    return "true"
+
+    return true
 end
 
-""" 
-bulk_update_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString}, new_embeddings::Vector{<:AbstractVector{<:Number}}; data_type::Union{Nothing,String}=nothing) -> Union{String}
-
-A convenience wrapper for performing a bulk update of embedding vectors using a database file path.
-
-This function opens the SQLite database located at db_path and then calls the primary bulk_update_embedding function to update the embeddings for the specified identifiers in the given collection (table). The function ensures that the database connection is properly closed after the operation. In case an error occurs during the update, a descriptive error message is returned as a String.
-
-# Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table containing the embeddings.
-- id_texts::Vector{<:AbstractString}: A vector of identifier strings corresponding to the rows to update.
-- new_embeddings::Vector{<:AbstractVector{<:Number}}: A vector of new embedding vectors. All embeddings must be of the same length.
-- data_type::Union{Nothing, String}=nothing: Optional. A string representing the data type of the embeddings. If omitted, the data type is inferred from the first embedding.
-
-# Returns
-- On success: A String ("true") indicating that the update was successful.
-- On error: A String containing the error message.
-
-# Example
-```julia
-result = bulk_update_embedding("mydatabase.sqlite", "embeddings", ["id1", "id2"], [[1.0, 2.0], [3.0, 4.0]])
-if startswith(result, "Error:")
-    println("Bulk update failed: ", result)
-else
-    println("Bulk update successful: ", result)
-end
-"""
-function bulk_update_embedding(db_path::String, collection_name::String, 
-    id_texts::Vector{<:AbstractString}, new_embeddings::Vector{<:AbstractVector{<:Number}};
-    data_type::Union{Nothing,String}=nothing)
+function update_embeddings(db_path::String, id_input, new_embedding_input)
     db = open_db(db_path)
     try
-        msg = bulk_update_embedding(db, collection_name, id_texts, new_embeddings; data_type=data_type)
+        result = update_embeddings(db, id_input, new_embedding_input)
         close_db(db)
-        return msg
+        return result
     catch e
         close_db(db)
         return "Error: $(e)"
     end
 end
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
 
 #RETRIEVE
+
 function parse_data_type(dt::String) 
     T = get(DATA_TYPE_MAP, dt, nothing) 
     if T === nothing 
@@ -988,91 +746,101 @@ function parse_data_type(dt::String)
     return T 
 end
 
+function blob_to_embedding(blob::Vector{UInt8}, ::Type{T}) where T
+    # reinterpret produces a view; use collect to obtain a standard Julia array.
+    return collect(reinterpret(T, blob))
+end
+
 
 """
-get_embedding(db::SQLite.DB, collection_name::String, id_text) -> Union{Vector{T}, Nothing} where T
+Retrieve one or more embeddings from the SQLite database by their ID(s).
 
-Retrieve the embedding vector for a given identifier from a specified collection (table) in an SQLite database.
+This function is overloaded to support:
+- `get_embeddings(db::SQLite.DB, id_input)`: Retrieves embeddings using an active database connection.
+- `get_embeddings(db_path::String, id_input)`: Opens the database at the specified path, retrieves embeddings, and then closes the connection.
 
-This function queries the table `collection_name` for the row where the `id_text` matches the provided identifier (converted to a string). The table is expected to have two columns:
-- `embedding_json`: A JSON-encoded string representing the embedding vector.
-- `data_type`: A string that specifies the type of the elements in the embedding vector.
-
-The JSON string is parsed into a Julia vector using `JSON3.read` with the element type determined by the helper function `parse_data_type`. If no matching row is found, the function returns `nothing`.
+When a single ID is provided, the corresponding embedding vector is returned (or `nothing` if not found). When multiple IDs are provided, a dictionary mapping each ID (as a string) to its embedding vector is returned.
 
 # Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table (collection) to query.
-- `id_text`: The identifier for which the embedding is requested (this value is converted to a string).
+- For `get_embeddings(db::SQLite.DB, id_input)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+  - `id_input`: A single ID or an array of IDs identifying the embeddings to retrieve.
+- For `get_embeddings(db_path::String, id_input)`:
+  - `db_path::String`: The file path to the SQLite database.
+  - `id_input`: A single ID or an array of IDs identifying the embeddings to retrieve.
 
 # Returns
-- A vector representing the parsed embedding if a matching row is found.
-- `nothing` if no row with the specified `id_text` exists.
+- A single embedding vector if one ID is provided, or a dictionary mapping IDs (as strings) to embedding vectors if multiple IDs are provided.
+- Returns `nothing` if a single requested ID is not found.
+- A `String` error message if an error occurs during retrieval.
 
-# Example
+# Examples
+
+Using an active database connection:
 ```julia
-embedding = get_embedding(db, "embeddings", "id123")
+embedding = get_embeddings(db, 42)
 if embedding === nothing
-    println("No embedding found for the given id.")
+    println("Embedding not found.")
 else
-    println("Retrieved embedding: ", embedding)
+    println("Embedding: ", embedding)
 end
+
+Using a database file path:
+
+embeddings = get_embeddings("my_database.db", [1, 2, 3])
+for (id, emb) in embeddings
+    println("ID: $id, Embedding: ", emb)
+end
+
 """
-function get_embedding(db::SQLite.DB, collection_name::String, id_text)
-    sql = """
-    SELECT embedding_json, data_type
-    FROM $(collection_name)
-    WHERE id_text = ?
-    """
-    #use DBInterface.execute and convert the results into NamedTuples
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, sql, (string(id_text),))))
-    if isempty(rows)
-        return nothing
+function get_embeddings(db::SQLite.DB, id_input)
+    #wrap a single ID into an array
+    ids = id_input isa AbstractVector ? id_input : [id_input]
+    n = length(ids)
+    if n == 0
+        error("No IDs provided for retrieval.")
     end
 
-    row = rows[1]
-    raw_json = row.embedding_json
-    dt_string = row.data_type
-
+    #build the query using an IN clause with comma-separated placeholders
+    placeholders = join(fill("?", n), ", ")
+    stmt = "SELECT id_text, embedding_blob FROM $MAIN_TABLE_NAME WHERE id_text IN ($placeholders)"
+    params = Tuple(string.(ids))
+    
+    #get rows from the main table
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
+    
+    #get meta table information to determine the stored data type
+    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    if isempty(meta_rows)
+        error("Meta table is empty. The meta row should have been initialized during database setup.")
+    end
+    meta = meta_rows[1]
+    dt_string = meta.data_type
     T = parse_data_type(dt_string)
-    embedding_vec = JSON3.read(raw_json, Vector{T})
-
-    return embedding_vec
+    
+    #make a dictionary mapping id_text to its embedding vector
+    result = Dict{String,Any}()
+    for row in rows
+        id = row.id_text
+        blob = row.embedding_blob  # this is a Vector{UInt8}
+        embedding_vec = blob_to_embedding(blob, T)
+        result[string(id)] = embedding_vec
+    end
+    
+    #only one ID was requested, return its embedding directly (or nothing if not found)
+    if n == 1
+        return isempty(result) ? nothing : first(values(result))
+    else
+        return result
+    end
 end
 
-""" 
-get_embedding(db_path::String, collection_name::String, id_text) -> Union{Vector{T}, Nothing, String} where T
-
-A convenience wrapper for retrieving an embedding vector from a specified SQLite database by using the database file path.
-
-This function opens the SQLite database located at db_path, delegates the retrieval of the embedding to get_embedding(db::SQLite.DB, collection_name, id_text), and then ensures that the database connection is closed. In the event of an error during the operation, the function returns a descriptive error message as a String.
-
-# Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table (collection) to query.
-- id_text: The identifier for which the embedding is requested (converted to a string).
-
-# Returns
-- On success: A vector representing the parsed embedding if found, or nothing if no matching row exists.
-- On error: A String containing an error message.
-
-Example
-```julia
-embedding = get_embedding("mydatabase.sqlite", "embeddings", "id123")
-if isa(embedding, String)
-    println("Error: ", embedding)
-elseif embedding === nothing
-    println("No embedding found for the given id.")
-else
-    println("Retrieved embedding: ", embedding)
-end
-"""
-function get_embedding(db_path::String, collection_name::String, id_text)
+function get_embeddings(db_path::String, id_input)
     db = open_db(db_path)
     try
-        vec = get_embedding(db, collection_name, id_text)
+        result = get_embeddings(db, id_input)
         close_db(db)
-        return vec
+        return result
     catch e
         close_db(db)
         return "Error: $(e)"
@@ -1080,345 +848,60 @@ function get_embedding(db_path::String, collection_name::String, id_text)
 end
 
 
+
 """
-bulk_get_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString}) -> Dict{String,Any}
+Randomly retrieve a specified number of embeddings from the SQLite database.
 
-Retrieve embeddings in bulk from the specified collection (table) in an SQLite database, based on a vector of identifier strings.
-
-This function first checks that the number of identifiers does not exceed a predefined bulk limit (`BULK_LIMIT`). It then constructs an SQL query using parameterized placeholders to select rows from the table `collection_name` where the `id_text` is one of the provided identifiers. For each returned row, it:
-  - Retrieves the `id_text`, JSON-encoded embedding (`embedding_json`), and `data_type`.
-  - Uses the helper function `parse_data_type` to determine the correct type for the embedding.
-  - Parses the JSON string into a vector using `JSON3.read`.
-  - Inserts the resulting embedding vector into a dictionary with the corresponding `id_text` as the key.
+This function is overloaded to support two usage patterns:
+- `random_embeddings(db::SQLite.DB, num::Int)`: Retrieves embeddings using an active database connection.
+- `random_embeddings(db_path::String, num::Int)`: Opens the database at the specified path, retrieves embeddings, and then closes the connection.
 
 # Arguments
-- `db::SQLite.DB`: An active SQLite database connection.
-- `collection_name::String`: The name of the table (collection) to query.
-- `id_texts::Vector{<:AbstractString}`: A vector of identifier strings for which embeddings should be fetched.
+- `db::SQLite.DB` or `db_path::String`: Either an active SQLite database connection or the file path to the SQLite database.
+- `num::Int`: The number of random embeddings to retrieve.
 
 # Returns
-- A `Dict{String,Any}` mapping each `id_text` (as a `String`) to its corresponding embedding vector.
-
-# Raises
-- Throws an error if the number of identifiers exceeds the limit specified by `BULK_LIMIT`.
+- A `Dict{String, Any}` mapping each embedding's ID (as a string) to its embedding vector.
 
 # Example
 ```julia
-db = SQLite.DB("mydatabase.sqlite")
-ids = ["id1", "id2", "id3"]
-embeddings = bulk_get_embedding(db, "embeddings", ids)
+embeddings = random_embeddings("my_database.db", 5)
 for (id, emb) in embeddings
-    println("ID: ", id, " -> Embedding: ", emb)
+    println("ID: $id, Embedding: ", emb)
 end
-"""
-function bulk_get_embedding(db::SQLite.DB, collection_name::String, id_texts::Vector{<:AbstractString})
-    n = length(id_texts)
-    if n > BULK_LIMIT
-        error("Bulk get limit exceeded: $n > $BULK_LIMIT")
-    end
-    placeholders = join(fill("?", n), ", ")
+
+""" 
+function random_embeddings(db::SQLite.DB, num::Int)
+    # TODO: global stmt
     stmt = """
-    SELECT id_text, embedding_json, data_type FROM $(collection_name)
-    WHERE id_text IN ($placeholders)
+        SELECT id_text, embedding_blob
+        FROM $MAIN_TABLE_NAME
+        ORDER BY RANDOM()
+        LIMIT ?;
     """
-    params = Tuple(string.(id_texts))
-    #use DBInterface.execute and convert the result into NamedTuples
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, (num,))))
+    
+    #meta table info to determine the stored data type
+    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    if isempty(meta_rows)
+        error("Meta table is empty. The meta row should have been initialized during database setup.")
+    end
+    meta = meta_rows[1]
+    T = parse_data_type(meta.data_type)
+    
+    #make the result dictionary mapping id_text to the embedding vector
     result = Dict{String,Any}()
     for row in rows
-        id = row.id_text
-        raw_json = row.embedding_json
-        dt_string = row.data_type
-        T = parse_data_type(dt_string)
-        embedding_vec = JSON3.read(raw_json, Vector{T})
-        result[string(id)] = embedding_vec
+        embedding_vec = blob_to_embedding(row.embedding_blob, T)
+        result[string(row.id_text)] = embedding_vec
     end
     return result
 end
 
-""" 
-bulk_get_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString}) -> Union{Dict{String,Any}, String}
-
-A convenience wrapper for bulk fetching embeddings from an SQLite database by specifying the database file path.
-
-This function opens the SQLite database located at db_path and calls the primary bulk_get_embedding function to retrieve embeddings for the provided id_texts. The function ensures that the database connection is closed after the operation, even if an error occurs. In case of an error during execution, a descriptive error message is returned as a String.
-
-# Arguments
-
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table (collection) to query.
-- id_texts::Vector{<:AbstractString}: A vector of identifier strings for which embeddings should be fetched.
-
-# Returns
-
-- On success: A Dict{String,Any} mapping each id_text to its corresponding embedding vector.
-- On error: A String containing an error message.
-
-# Example
-```julia
-ids = ["id1", "id2", "id3"]
-result = bulk_get_embedding("mydatabase.sqlite", "embeddings", ids)
-if isa(result, String)
-    println("Error occurred: ", result)
-else
-    for (id, emb) in result
-        println("ID: ", id, " -> Embedding: ", emb)
-    end
-end
-"""
-function bulk_get_embedding(db_path::String, collection_name::String, id_texts::Vector{<:AbstractString})
+function random_embeddings(db_path::String, num::Int)
     db = open_db(db_path)
     try
-        result = bulk_get_embedding(db, collection_name, id_texts)
-        close_db(db)
-        return result
-    catch e
-        close_db(db)
-        return "Error: $(e)"
-    end
-end
-
-
-#utility functions
-
-"""
-get_next_id(db::SQLite.DB, collection_name::String, current_id; full_row::Bool=false) -> Union{Nothing, Any}
-
-Retrieve the entry that immediately follows a given `current_id` in lexicographical (alphabetical) order from the specified collection (table) in an SQLite database.
-
-This function searches for the row in `collection_name` where the `id_text` is lexicographically greater than `current_id`. The SQL query uses the condition `WHERE id_text > ?` and orders the results in ascending lexicographical order (`ORDER BY id_text ASC`), ensuring that the smallest `id_text` greater than `current_id` is returned.
-
-- **When `full_row` is `false` (default):**  
-  Only the `id_text` of the next entry is returned.
-  
-- **When `full_row` is `true`:**  
-  The function returns a NamedTuple containing:
-  - `id_text`: The identifier of the entry.
-  - `embedding`: The embedding vector parsed from the JSON string found in the `embedding_json` field.
-  - `data_type`: The data type indicator used for parsing the embedding (with the appropriate type determined by `parse_data_type`).
-
-If no such entry is found (i.e., there is no row with an `id_text` lexicographically greater than `current_id`), the function returns `nothing`.
-
-# Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table (collection) to query.
-- `current_id`: The current identifier for comparison (expected to be a string or a type compatible with lexicographical ordering).
-- `full_row::Bool=false`: Optional flag. Set to `true` to retrieve the full row (with parsed embedding); otherwise, only the `id_text` is returned.
-
-# Returns
-- If a next entry is found:
-  - **Default (`full_row == false`):** Returns the `id_text` of the next entry.
-  - **If `full_row == true`:** Returns a NamedTuple with fields `id_text`, `embedding`, and `data_type`.
-- If no entry is found: Returns `nothing`.
-
-# Example
-```julia
-# Retrieve only the next id based on lexicographical ordering:
-next_id = get_next_id(db, "embeddings", current_id)
-println("Next ID (lexicographical): ", next_id)
-
-# Retrieve the full next row with parsed embedding:
-next_row = get_next_id(db, "embeddings", current_id; full_row=true)
-if next_row !== nothing
-    @show next_row.id_text, next_row.embedding, next_row.data_type
-else
-    println("No next entry found based on lexicographical ordering.")
-end
-"""
-function get_next_id(db::SQLite.DB, collection_name::String, current_id; full_row::Bool=false)
-    if full_row
-        query = """
-            SELECT id_text, embedding_json, data_type
-            FROM $(collection_name)
-            WHERE id_text > ?
-            ORDER BY id_text ASC
-            LIMIT 1;
-        """
-    else
-        query = """
-            SELECT id_text
-            FROM $(collection_name)
-            WHERE id_text > ?
-            ORDER BY id_text ASC
-            LIMIT 1;
-        """
-    end
-    #use DBInterface.execute with Tables.namedtupleiterator for proper row conversion
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (current_id,))))
-    if isempty(rows)
-        return nothing
-    end
-    row = rows[1]
-    if !full_row
-        return row.id_text
-    else
-        #parse the JSON embedding using the stored data type
-        T = parse_data_type(row.data_type)
-        embedding_vec = JSON3.read(row.embedding_json, Vector{T})
-        return (id_text = row.id_text, embedding = embedding_vec, data_type = row.data_type)
-    end
-end
-
-""" 
-get_next_id(db_path::String, collection_name::String, current_id; full_row::Bool=false) -> Union{Nothing, Any, String}
-
-A convenience wrapper for retrieving the entry that immediately follows a given current_id (based on lexicographical ordering) from a specified collection using a database file path.
-
-This function opens an SQLite database using the provided db_path and delegates the retrieval of the next entry to get_next_id(db::SQLite.DB, collection_name, current_id; full_row::Bool=false). The lexicographical comparison (WHERE id_text > ?) ensures that the smallest id_text greater than current_id is returned. The database connection is closed after the operation, and any errors encountered are returned as a descriptive string.
-Arguments
-
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table (collection) to query.
-- current_id: The current identifier used for comparison.
-- full_row::Bool=false: Optional flag. Set to true to retrieve the full row (with parsed embedding); otherwise, only the id_text is returned.
-
-# Returns
-- On success:
-  - If a next entry is found:
-    - Default (full_row == false): Returns the id_text of the next entry.
-    - If full_row == true): Returns a NamedTuple with fields id_text, embedding, and data_type.
-  - If no entry is found: Returns nothing.
-- On error: Returns a String containing the error message.
-
-# Example
-```julia
-result = get_next_id("mydatabase.sqlite", "embeddings", current_id; full_row=true)
-if isa(result, String)
-    println("Error: ", result)
-elseif result === nothing
-    println("No next entry found based on lexicographical ordering.")
-else
-    @show result.id_text, result.embedding, result.data_type
-end
-"""
-function get_next_id(db_path::String, collection_name::String, current_id; full_row::Bool=false)
-    db = open_db(db_path)
-    try
-        result = get_next_id(db, collection_name, current_id; full_row=full_row)
-        close_db(db)
-        return result
-    catch e
-        close_db(db)
-        return "Error: $(e)"
-    end
-end
-
-
-"""
-get_previous_id(db::SQLite.DB, collection_name::String, current_id; full_row::Bool=false) -> Union{Nothing, Any}
-
-Retrieve the entry that immediately precedes a given `current_id` in lexicographical (alphabetical) order from the specified collection (table) in an SQLite database.
-
-This function searches for the row in `collection_name` where the `id_text` is lexicographically less than `current_id`. The comparison is performed using standard string ordering (i.e., alphabetical order), so it is assumed that the `id_text` values are stored as strings. The query orders the results in descending lexicographical order by `id_text`, ensuring that the row with the closest preceding `id_text` is selected.
-
-- **When `full_row` is `false` (default):**  
-  The function returns only the `id_text` of the previous entry.
-
-- **When `full_row` is `true`:**  
-  The function returns a NamedTuple containing:
-  - `id_text`: The identifier of the entry.
-  - `embedding`: The embedding vector parsed from the JSON string in the `embedding_json` field.
-  - `data_type`: The data type indicator used to parse the embedding (with the type determined by `parse_data_type`).
-
-If no entry is found (i.e., there is no row with an `id_text` lexicographically less than `current_id`), the function returns `nothing`.
-
-# Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table (collection) to query.
-- `current_id`: The current identifier used for comparison (expected to be a string or compatible type).
-- `full_row::Bool=false`: Optional flag. Set to `true` to retrieve the full row (with parsed embedding), or `false` to retrieve only the `id_text`.
-
-# Returns
-- If a previous entry is found:
-  - **Default (`full_row == false`):** Returns the `id_text` of the previous entry.
-  - **If `full_row == true`:** Returns a NamedTuple with fields `id_text`, `embedding`, and `data_type`.
-- If no previous entry is found: Returns `nothing`.
-
-# Example
-```julia
-# Retrieve only the previous id based on lexicographical ordering:
-prev_id = get_previous_id(db, "embeddings", current_id)
-println("Previous ID (lexicographical): ", prev_id)
-
-# Retrieve the full previous row with parsed embedding:
-prev_row = get_previous_id(db, "embeddings", current_id; full_row=true)
-if prev_row !== nothing
-    @show prev_row.id_text, prev_row.embedding, prev_row.data_type
-else
-    println("No previous entry found based on lexicographical ordering.")
-end
-"""
-function get_previous_id(db::SQLite.DB, collection_name::String, current_id; full_row::Bool=false)
-    if full_row
-        query = """
-            SELECT id_text, embedding_json, data_type
-            FROM $(collection_name)
-            WHERE id_text < ?
-            ORDER BY id_text DESC
-            LIMIT 1;
-        """
-    else
-        query = """
-            SELECT id_text
-            FROM $(collection_name)
-            WHERE id_text < ?
-            ORDER BY id_text DESC
-            LIMIT 1;
-        """
-    end
-    # using DBInterface.execute with Tables.namedtupleiterator to get NamedTuples.
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (current_id,))))
-    if isempty(rows)
-        return nothing
-    end
-    row = rows[1]
-    if !full_row
-        return row.id_text
-    else
-        T = parse_data_type(row.data_type)
-        embedding_vec = JSON3.read(row.embedding_json, Vector{T})
-        return (id_text = row.id_text, embedding = embedding_vec, data_type = row.data_type)
-    end
-end
-
-""" 
-get_previous_id(db_path::String, collection_name::String, current_id; full_row::Bool=false) -> Union{Nothing, Any, String}
-
-A convenience wrapper for retrieving the entry immediately preceding a given current_id (based on lexicographical ordering) from a collection by specifying the database file path.
-
-This function opens an SQLite database using the provided db_path and delegates the task to get_previous_id(db::SQLite.DB, collection_name, current_id; full_row::Bool=false). The comparison of id_text values is performed lexicographically (alphabetically), ensuring that the row with the closest preceding identifier is selected. The database connection is properly closed after the operation. In the event of an error, the function returns a descriptive error message as a String.
-
-# Arguments
-
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table (collection) to query.
-- current_id: The current identifier used for comparison (expected to be a string or a compatible type).
-- full_row::Bool=false: Optional flag. Set to true to retrieve the full row (with parsed embedding), or false to retrieve only the id_text.
-
-# Returns
-
-- On success:
-  - If a previous entry is found:
-    - Default (full_row == false): Returns the id_text of the previous entry.
-    - If full_row == true: Returns a NamedTuple with fields id_text, embedding, and data_type.
-  - If no previous entry is found: Returns nothing.
-- On error: Returns a String containing the error message.
-
-# Example
-```julia
-result = get_previous_id("mydatabase.sqlite", "embeddings", current_id; full_row=true)
-if isa(result, String)
-    println("Error: ", result)
-elseif result === nothing
-    println("No previous entry found based on lexicographical ordering.")
-else
-    @show result.id_text, result.embedding, result.data_type
-end
-"""
-function get_previous_id(db_path::String, collection_name::String, current_id; full_row::Bool=false)
-    db = open_db(db_path)
-    try
-        result = get_previous_id(db, collection_name, current_id; full_row=full_row)
+        result = random_embeddings(db, num)
         close_db(db)
         return result
     catch e
@@ -1429,83 +912,173 @@ end
 
 
 
+
+
 """
-count_entries(db::SQLite.DB, collection_name::String; update_meta::Bool=false) -> Int
+Retrieve the adjacent record relative to a given `current_id` from the SQLite database.
 
-Count the total number of entries (rows) in the specified collection (table) from an SQLite database,
-and optionally update the associated metadata table.
+This function is overloaded to support both an active database connection and a database file path:
+- `get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=true)`: Uses an active connection.
+- `get_adjacent_id(db_path::String, current_id; direction="next", full_row=true)`: Opens the database at the specified path, retrieves the adjacent record, and then closes the connection.
 
-This function performs an SQL `COUNT(*)` query on the table named `collection_name` to obtain the number of rows.
-It retrieves the count from a result set containing a named tuple with the field `count`. Optionally, if the keyword
-argument `update_meta` is set to `true`, the function updates the metadata table, which is assumed to be named
-`\$(collection_name)_meta`. The metadata update behavior is as follows:
-- **If count > 0:** Update the `row_num` field with the current count.
-- **If count == 0:** Clear the metadata by setting `row_num` to 0 and `vector_length` to `NULL`.
+The function returns the record immediately after (or before) the specified `current_id` based on the `direction` parameter. When `full_row` is `true`, the returned result is a named tuple containing the `id_text`, the decoded embedding vector, and the stored `data_type`. When `full_row` is `false`, only the `id_text` is returned.
 
 # Arguments
-- `db::SQLite.DB`: An open connection to an SQLite database.
-- `collection_name::String`: The name of the table whose entries are to be counted.
-- `update_meta::Bool=false`: Optional flag indicating whether to update the metadata table based on the count.
+- **For `get_adjacent_id(db::SQLite.DB, current_id; direction, full_row)`**:
+  - `db::SQLite.DB`: An active SQLite database connection.
+  - `current_id`: The current record's ID from which to find the adjacent record.
+  - `direction::String="next"`: The direction to search for the adjacent record. Use `"next"` for the record with an ID greater than `current_id`, or `"previous"` (or `"prev"`) for the record with an ID less than `current_id`.
+  - `full_row::Bool=true`: If `true`, return the full record (including embedding and meta data); if `false`, return only the `id_text`.
+
+- **For `get_adjacent_id(db_path::String, current_id; direction, full_row)`**:
+  - `db_path::String`: The file path to the SQLite database.
+  - Other parameters are as described above.
 
 # Returns
-- `Int`: The number of entries (rows) in the specified table.
+- When `full_row` is `true`: A named tuple `(id_text, embedding, data_type)` representing the adjacent record.
+- When `full_row` is `false`: The adjacent record's `id_text`.
+- Returns `nothing` if no adjacent record is found.
+- For the `db_path` overload, a `String` error message is returned if an error occurs.
 
 # Example
 ```julia
-db = SQLite.DB("mydatabase.sqlite")
-num_entries = count_entries(db, "embeddings"; update_meta=true)
-println("Number of entries: ", num_entries)
+# Using an active database connection:
+adjacent = get_adjacent_id(db, 100; direction="previous", full_row=false)
+if adjacent !== nothing
+    println("Adjacent ID: ", adjacent)
+else
+    println("No adjacent record found.")
+end
+
+# Using a database file path:
+result = get_adjacent_id("my_database.db", 100; direction="next")
+if result isa NamedTuple
+    println("Adjacent record: ", result)
+else
+    println("Error or record not found: ", result)
+end
+
 """
-function count_entries(db::SQLite.DB, collection_name::String; update_meta::Bool=false)
-    stmt = "SELECT COUNT(*) AS count FROM $(collection_name)"
-    #using DBInterface.execute with Tables.namedtupleiterator so that we get a NamedTuple with field "count"
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt)))
-    count = rows[1].count
+function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=true)
     
+    if direction == "next"
+        comp_op = ">"
+        order_clause = "ASC"
+    elseif direction == "previous" || direction == "prev"
+        comp_op = "<"
+        order_clause = "DESC"
+    else
+        error("Invalid direction: $direction. Use :next or :previous.")
+    end
+
+    #make the SQL query
+    if full_row
+        query = """
+            SELECT id_text, embedding_blob
+            FROM $MAIN_TABLE_NAME
+            WHERE id_text $comp_op ?
+            ORDER BY id_text $order_clause
+            LIMIT 1;
+        """
+    else
+        query = """
+            SELECT id_text
+            FROM $MAIN_TABLE_NAME
+            WHERE id_text $comp_op ?
+            ORDER BY id_text $order_clause
+            LIMIT 1;
+        """
+    end
+
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (string(current_id),))))
+    if isempty(rows)
+        return nothing
+    end
+    row = rows[1]
+    
+    if !full_row
+        return row.id_text
+    else
+        #full_row retrieval, obtain the stored data type from the meta table
+        meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+        if isempty(meta_rows)
+            error("Meta table is empty. The meta row should have been initialized during database setup.")
+        end
+        meta = meta_rows[1]
+        T = parse_data_type(meta.data_type)
+        embedding_vec = blob_to_embedding(row.embedding_blob, T)
+        return (id_text = row.id_text, embedding = embedding_vec, data_type = meta.data_type)
+    end
+end
+
+function get_adjacent_id(db_path::String, current_id; direction="next", full_row=true)
+    db = open_db(db_path)
+    try
+        result = get_adjacent_id(db, current_id; direction=direction, full_row=full_row)
+        close_db(db)
+        return result
+    catch e
+        close_db(db)
+        return "Error: $(e)"
+    end
+end
+
+
+
+
+"""
+Count the number of entries in the main table of the SQLite database.
+
+This function is overloaded to support both an active database connection and a database file path:
+- `count_entries(db::SQLite.DB; update_meta::Bool=false)`: Counts entries using an active database connection.
+- `count_entries(db_path::String; update_meta::Bool=false)`: Opens the database at the specified path, counts entries, optionally updates the meta table, and then closes the connection.
+
+# Arguments
+- For `count_entries(db::SQLite.DB; update_meta::Bool=false)`:
+  - `db::SQLite.DB`: An active SQLite database connection.
+- For `count_entries(db_path::String; update_meta::Bool=false)`:
+  - `db_path::String`: The file path to the SQLite database.
+- `update_meta::Bool=false`: When set to `true`, updates the meta table with the current count. If the count is 0, it clears the meta information (i.e., sets `embedding_count` to 0 and resets `embedding_length` if applicable).
+
+# Returns
+- The number of entries (an integer) in the main table.
+- In the `db_path` overload, returns a `String` error message if an error occurs.
+
+# Example
+```julia
+# Using an active database connection:
+entry_count = count_entries(db, update_meta=true)
+println("Number of entries: ", entry_count)
+
+# Using a database file path:
+entry_count = count_entries("my_database.db", update_meta=true)
+println("Number of entries: ", entry_count)
+
+"""
+function count_entries(db::SQLite.DB; update_meta::Bool=false)
+    stmt = "SELECT COUNT(*) AS count FROM $MAIN_TABLE_NAME"
+    #the Tables interface for consistent row conversion
+    rows = collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
+    count = rows[1].count
+
     if update_meta
         if count > 0
-            update_stmt = "UPDATE $(collection_name)_meta SET row_num = ?"
-            DBInterface.execute(db, update_stmt, (count,))
+            update_stmt = "UPDATE $META_DATA_TABLE_NAME SET embedding_count = ?"
+            SQLite.execute(db, update_stmt, (count,))
         else
-            #if count is 0, clear the meta information.
-            update_stmt = "UPDATE $(collection_name)_meta SET row_num = 0, vector_length = NULL"
-            DBInterface.execute(db, update_stmt)
+            #if count is 0, clear the meta information (embedding_count = 0 and embedding_length = NULL)
+            update_stmt = "UPDATE $META_DATA_TABLE_NAME SET embedding_count = 0"
+            SQLite.execute(db, update_stmt)
         end
     end
-    
+
     return count
 end
 
-""" 
-count_entries(db_path::String, collection_name::String; update_meta::Bool=false) -> Union{Int, String}
-
-A convenience wrapper for counting entries in a specified table of an SQLite database by using a file path. This function opens an SQLite database using db_path, delegates the counting to count_entries(db::SQLite.DB, collection_name; update_meta::Bool=false), and then ensures that the database connection is closed after the operation. In case an error occurs during the process, the function returns a descriptive error message as a string.
-
-# Arguments
-
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table whose entries are to be counted.
-- update_meta::Bool=false: Optional flag indicating whether to update the metadata table.
-
-# Returns
-
-- On success: An Int representing the number of entries in the table.
-- On error: A String containing the error message.
-
-# Example
-
-```julia
-result = count_entries("mydatabase.sqlite", "embeddings"; update_meta=true)
-if isa(result, String)
-    println("Error occurred: ", result)
-else
-    println("Number of entries: ", result)
-end
-"""
-function count_entries(db_path::String, collection_name::String; update_meta::Bool=false)
+function count_entries(db_path::String; update_meta::Bool=false)
     db = open_db(db_path)
     try
-        count = count_entries(db, collection_name; update_meta=update_meta)
+        count = count_entries(db; update_meta=update_meta)
         close_db(db)
         return count
     catch e
@@ -1517,178 +1090,9 @@ end
 
 
 
-"""
-get_embedding_size(db::SQLite.DB, collection_name::String) -> Int
-
-Fetch the embedding vector size for a given collection from the metadata table in an SQLite database.
-
-This function queries the metadata table associated with the collection, which is assumed to be named 
-`\$(collection_name)_meta`, and retrieves the value of the `vector_length` column. If no metadata is found, 
-the function returns `0`; otherwise, it returns the embedding size from the first row of the query result.
-
-# Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The base name of the collection whose embedding size is to be retrieved. The
-  metadata table is expected to be named as `\$(collection_name)_meta`.
-
-# Returns
-- `Int`: The embedding vector size if metadata is found, or `0` if no metadata exists.
-
-# Example
-```julia
-db = SQLite.DB("mydatabase.sqlite")
-embedding_size = get_embedding_size(db, "embeddings")
-println("Embedding size: ", embedding_size)
-"""
-function get_embedding_size(db::SQLite.DB, collection_name::String)
-    stmt = "SELECT vector_length FROM $(collection_name)_meta"
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt)))
-    if isempty(rows)
-        return 0
-    else
-        return rows[1].vector_length
-    end
-end
-
-""" 
-get_embedding_size(db_path::String, collection_name::String) -> Union{Int, String}
-
-A convenience wrapper for retrieving the embedding size from an SQLite database using a file path.
-
-This function opens an SQLite database using the provided db_path and delegates the retrieval of the embedding size to get_embedding_size(db::SQLite.DB, collection_name). It ensures that the database connection is closed after the operation. If an error occurs during the process, the function returns a string with the error message.
-
-# Arguments
-
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The base name of the collection. The metadata table is expected to be named \$(collection_name)_meta.
-
-# Returns
-- On success: An Int representing the embedding vector size.
-- On error: A String containing an error message.
-
-# Example
-```julia
-embedding_size = get_embedding_size("mydatabase.sqlite", "embeddings")
-if isa(embedding_size, String)
-    println("Error occurred: ", embedding_size)
-else
-    println("Embedding size: ", embedding_size)
-end
-""" 
-function get_embedding_size(db_path::String, collection_name::String)
-    db = open_db(db_path)
-    try
-        size = get_embedding_size(db, collection_name)
-        close_db(db)
-        return size
-    catch e
-        close_db(db)
-        return "Error: $(e)"
-    end
-end
 
 
 
-"""
-random_embeddings(db::SQLite.DB, collection_name::String, num::Int) -> Vector{Dict{String,Any}}
-
-Retrieve a specified number of random embedding records from a given collection in an SQLite database.
-
-This function performs an SQL query against the specified `collection_name` (which is typically the name
-of a table in the database) to fetch up to `num` random rows. Each row is expected to have the following columns:
-- `id_text`: An identifier for the embedding.
-- `embedding_json`: A JSON string representing the embedding vector.
-- `data_type`: A string indicating the data type of the elements within the embedding.
-
-The JSON in `embedding_json` is parsed using JSON3 into a `Vector{T}`, where the type `T` is determined by
-the `data_type` field (via the helper function `parse_data_type`).
-
-# Arguments
-- `db::SQLite.DB`: An active connection to an SQLite database.
-- `collection_name::String`: The name of the table/collection from which to retrieve embeddings.
-- `num::Int`: The number of random embeddings to retrieve. This value must be between 1 and `BULK_LIMIT`.
-
-# Returns
-A `Vector{Dict{String, Any}}` where each dictionary has the following keys:
-- `"id_text"`: The unique identifier for the embedding.
-- `"embedding"`: The embedding vector (parsed from JSON).
-- `"data_type"`: The data type string that was used to parse the embedding.
-
-# Throws
-- Raises an error if `num` is less than 1 or greater than `BULK_LIMIT`.
-
-# Example
-```julia
-db = SQLite.DB("mydatabase.sqlite")
-embeddings = random_embeddings(db, "embeddings_table", 5)
-for record in embeddings
-    @show record["id_text"], record["embedding"], record["data_type"]
-end
-
-"""
-function random_embeddings(db::SQLite.DB, collection_name::String, num::Int)
-    if num < 1 || num > BULK_LIMIT
-        error("Requested number of random embeddings must be between 1 and $BULK_LIMIT")
-    end
-
-    stmt = """
-        SELECT id_text, embedding_json, data_type 
-        FROM $(collection_name)
-        ORDER BY RANDOM() 
-        LIMIT ?;
-    """
-    # DBInterface.execute together with Tables.namedtupleiterator.
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, (num,))))
-    
-    results = Vector{Dict{String,Any}}(undef, length(rows))
-    for (i, row) in enumerate(rows)
-        T = parse_data_type(row.data_type)
-        embedding = JSON3.read(row.embedding_json, Vector{T})
-        results[i] = Dict("id_text" => row.id_text, "embedding" => embedding, "data_type" => row.data_type)
-    end
-
-    return results
-end
-
-""" 
-random_embeddings(db_path::String, collection_name::String, num::Int) -> Union{Vector{Dict{String,Any}}, String}
-
-A convenience wrapper to retrieve random embedding records by providing a database file path.
-
-This function opens an SQLite database using the file path db_path, then delegates the task of fetching random embeddings to the random_embeddings(db::SQLite.DB, collection_name, num) function. Once the data has been retrieved (or an error occurs), the database connection is properly closed. In the event of an exception during retrieval, the function returns a string that describes the error.
-
-# Arguments
-- db_path::String: The file path to the SQLite database.
-- collection_name::String: The name of the table/collection from which to retrieve embeddings.
-- num::Int: The number of random embeddings to retrieve. This value must be between 1 and BULK_LIMIT.
-
-# Returns
-
-    On success: A Vector{Dict{String, Any}} where each dictionary contains keys "id_text", "embedding", and "data_type".
-    On failure: A String containing an error message.
-
-# Example
-
-result = random_embeddings("mydatabase.sqlite", "embeddings_table", 5)
-if typeof(result) == String
-    println("An error occurred: ", result)
-else
-    for record in result
-        @show record["id_text"], record["embedding"], record["data_type"]
-    end
-end
-"""
-function random_embeddings(db_path::String, collection_name::String, num::Int)
-    db = open_db(db_path)
-    try
-        result = random_embeddings(db, collection_name, num)
-        close_db(db)
-        return result
-    catch e
-        close_db(db)
-        return "Error: $(e)"
-    end
-end
 
 
 
