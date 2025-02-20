@@ -208,35 +208,60 @@ This function performs the following steps:
    The configured SQLite database connection is returned.
 
 # Arguments
-- `db_path::String`: The file path to the SQLite database. The function will ensure that the directory containing this file exists.
+- `db_path::String`: The file path to the SQLite database. The function will ensure that the directory containing this file exists
+- `keep_conn_open::Bool`: Optional, whether the connection should persist on the session after the function returns
 
 # Returns
 - An instance of `SQLite.DB` representing the open and configured database connection.
 
 # Example
 ```julia
-db = open_db("data/mydatabase.sqlite")
+db = open_db("data/mydatabase.sqlite", keep_conn_open="true")
 # Use the database connection...
 SQLite.execute(db, "SELECT * FROM my_table;")
 # Don't forget to close the database when done.
 close_db(db)
 """
-function open_db(db_path::String)
-    dirpath = Base.dirname(db_path)
-    
-    if !isdir(dirpath)
-        try
-            mkpath(dirpath)
-        catch e
-            error("ERROR: Could not create directory $dirpath. Original error: $(e)")
+function open_db(db_path::String; keep_conn_open::Bool=true)
+
+    KEEP_DB_OPEN[] = keep_conn_open
+
+    if keep_conn_open
+        if isnothing(DB_HANDLE[]) == false
+            return DB_HANDLE[]
+        else
+            dirpath = Base.dirname(db_path)
+            if !isdir(dirpath)
+                try
+                    mkpath(dirpath)
+                catch e
+                    error("ERROR: Could not create directory $dirpath. Original error: $(e)")
+                end
+            end
+            
+            db = SQLite.DB(db_path)
+            SQLite.execute(db, "PRAGMA journal_mode = WAL;")
+            SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
+            DB_HANDLE[] = db
+            return db
         end
+    else
+        DB_HANDLE[] = nothing    
+        dirpath = Base.dirname(db_path)
+        
+        if !isdir(dirpath)
+            try
+                mkpath(dirpath)
+            catch e
+                error("ERROR: Could not create directory $dirpath. Original error: $(e)")
+            end
+        end
+        
+        db = SQLite.DB(db_path)
+        SQLite.execute(db, "PRAGMA journal_mode = WAL;")
+        SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
+        return db
     end
-    db = SQLite.DB(db_path)
-
-    SQLite.execute(db, "PRAGMA journal_mode = WAL;")
-    SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
-
-    return db
 end
 
 
@@ -248,17 +273,31 @@ This function is a simple wrapper around SQLite.close to ensure that the provide
 
 # Arguments
 
-- db::SQLite.DB: The SQLite database connection to be closed.
+- db::SQLite.DB: (optional) The SQLite database connection to be closed, and if not included the default of the persistent db object is used
 
 # Example
 ```julia
 db = open_db("data/mydatabase.sqlite")
 # Perform database operations...
 close_db(db)
+
+or 
+close_db()
 """ 
 function close_db(db::SQLite.DB)
     SQLite.close(db)
+    DB_HANDLE[] = nothing
+    KEEP_DB_OPEN[] = false
 end
+
+function close_db()
+    if !isnothing(DB_HANDLE[])
+        SQLite.close(DB_HANDLE[])
+    end
+    DB_HANDLE[] = nothing
+    KEEP_DB_OPEN[] = false
+end
+
 
 
 """
@@ -282,6 +321,14 @@ end
 
 """
 function delete_db(db_path::String)
+
+    if !isnothing(DB_HANDLE[])
+        SQLite.close(DB_HANDLE[])
+    end
+
+    KEEP_DB_OPEN[] = false
+    DB_HANDLE[] = nothing
+
     if isfile(db_path)
         try
             rm(db_path)
@@ -315,14 +362,19 @@ end
 
 """
 function delete_all_embeddings(db_path::String)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+    
     try
-        SQLite.execute(db, DELETE_EMBEDDINGS_STMT) #clear all embeddings
-        SQLite.execute(db, META_RESET_STMT) #reset the embedding count to 0
-        close_db(db)
+        SQLite.transaction(db) do
+            SQLite.execute(db, DELETE_EMBEDDINGS_STMT) #clear all embeddings
+            SQLite.execute(db, META_RESET_STMT) #reset the embedding count to 0
+        end
+
         return true
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
