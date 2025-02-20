@@ -47,7 +47,6 @@ const DATA_TYPE_MAP = Dict(
     "Float16"  => Float16,
     "Float32"  => Float32,
     "Float64"  => Float64,
-    "BigFloat" => BigFloat,
     "Int8"     => Int8,
     "UInt8"    => UInt8,
     "Int16"    => Int16,
@@ -533,12 +532,34 @@ function infer_data_type(embedding::AbstractVector{<:Number})
 end
 
 
-function embedding_to_blob(embedding::AbstractVector{<:Number})
-    return Vector{UInt8}(reinterpret(UInt8, embedding))
+# function embedding_to_blob(embedding::AbstractVector{<:Number})
+#     return Vector{UInt8}(reinterpret(UInt8, embedding))
+# end
+
+function embedding_to_blob(embedding::AbstractVector{T}) where T <: Number
+    if IS_LITTLE_ENDIAN
+        return Vector{UInt8}(reinterpret(UInt8, embedding))
+    else
+        # If T occupies only one byte, no swap is necessary.
+        if sizeof(T) == 1
+            return Vector{UInt8}(reinterpret(UInt8, embedding))
+        end
+        swapped = if T <: Integer
+            bswap.(embedding)
+        elseif T == Float16
+            bswap.(reinterpret(UInt16, embedding))
+        elseif T == Float32
+            bswap.(reinterpret(UInt32, embedding))
+        elseif T == Float64
+            bswap.(reinterpret(UInt64, embedding))
+        elseif T in (Int128, UInt128)
+            bswap.(embedding)
+        else
+            error("Type $T not supported for byte swapping")
+        end
+        return Vector{UInt8}(reinterpret(UInt8, swapped))
+    end
 end
-
-
-
 
 
 
