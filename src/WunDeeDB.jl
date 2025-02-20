@@ -5,7 +5,7 @@ using Tables, DBInterface
 using JSON3
 
 
-export get_supported_data_types, get_supported_endianness_types,
+export get_supported_data_types,
         initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
         get_meta_data,
         infer_data_type,
@@ -25,6 +25,24 @@ export get_supported_data_types, get_supported_endianness_types,
 #IVF, HSNW
 ###################
 
+const DB_HANDLE = Ref{Union{SQLite.DB, Nothing}}(nothing) #handle for the db connection to use instead of open/close fast
+const KEEP_DB_OPEN = Ref{Bool}(true) #keep open or not the db connection after use
+
+#use 2 approaches for getting the endianness of the system
+function check_is_little_endian()
+    check1 = reinterpret(UInt8, [UInt16(1)])[1] == 1
+    check2 = ntoh(UInt16(1)) != UInt16(1)
+
+    if( check1 || check2 )
+        return true
+    else
+        return false
+    end
+end
+
+const IS_LITTLE_ENDIAN = check_is_little_endian() #boolian
+
+
 const DATA_TYPE_MAP = Dict(
     "Float16"  => Float16,
     "Float32"  => Float32,
@@ -42,7 +60,7 @@ const DATA_TYPE_MAP = Dict(
     "UInt128"  => UInt128
 )
 
-const ENDIANNESS_TYPES = ["small", "big"]
+
 
 const MAIN_TABLE_NAME = "Embeddings"
 const META_DATA_TABLE_NAME = "EmbeddingsMetaData"
@@ -59,15 +77,16 @@ const CREATE_META_TABLE_STMT = """
 	   embedding_count BIGINT,
 	   embedding_length INT,
 	   data_type TEXT NOT NULL,
-           endianness TEXT NOT NULL
+       endianness TEXT NOT NULL,
+       description TEXT
        )
        """
 
 const DELETE_EMBEDDINGS_STMT = "DELETE FROM $(MAIN_TABLE_NAME)"
 
 const META_TABLE_FULL_ROW_INSERTION_STMT = """
-        INSERT INTO $(META_DATA_TABLE_NAME) (embedding_count, embedding_length, data_type, endianness)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO $(META_DATA_TABLE_NAME) (embedding_count, embedding_length, data_type, endianness, description)
+        VALUES (?, ?, ?, ?, ?)
         """
 
 const META_SELECT_ALL_QUERY = "SELECT * FROM $(META_DATA_TABLE_NAME)"
@@ -86,14 +105,6 @@ function get_supported_data_types()::Vector{String}
     return sort(collect(keys(DATA_TYPE_MAP)))
 end
 
-"""
-    get_supported_endianness_types() -> Vector{String}
-
-Returns a sorted vector of supported endianness types as strings.
-"""
-function get_supported_endianness_types()::Vector{String}
-    return sort(ENDIANNESS_TYPES)
-end
 
 
 
@@ -108,7 +119,8 @@ Initialize a SQLite database by setting up the main and meta tables with appropr
 - `db_path::String`: Path to the SQLite database file.
 - `embedding_length::Int`: Length of the embedding vector. Must be 1 or greater.
 - `data_type::String`: Data type for the embeddings. Must be one of the supported types (use `get_supported_data_types()` to see valid options).
-- `endianness::String="small"`: Endianness setting. Must be one of the allowed types (see `get_supported_endianness_types()`).
+- `description::String=""`: (optional) User selected description meta data, defaults to empty string
+- `keep_conn_open::Bool=true`: (optional) Keep the DB connection open for rapid successive uses or false for multiple applications to release
 
 # Returns
 - `true` on successful initialization.
@@ -116,7 +128,7 @@ Initialize a SQLite database by setting up the main and meta tables with appropr
 
 # Example
 ```julia
-result = initialize_db("my_database.db", 128, "float32", endianness="little")
+result = initialize_db("my_database.db", 128, "float32", description="embeddings from 01/01/25", keep_conn_open=true)
 if result === true
     println("Database initialized successfully!")
 else
@@ -124,16 +136,16 @@ else
 end
 
 """
-function initialize_db(db_path::String, embedding_length::Int, data_type::String; endianness::String="small")
+function initialize_db(db_path::String, embedding_length::Int, data_type::String; description::String="", keep_conn_open::Bool=true)
+
+    keep_conn_open ? KEEP_DB_OPEN[] = true : KEEP_DB_OPEN[] = false
+
+    endianness = "small"
 
     arg_support_string = ""
 
     if !(data_type in keys(DATA_TYPE_MAP))
         arg_support_string *= "Unsupported data_type, run get_supported_data_types() to get the supported types. "
-    end
-
-    if !( endianness in ENDIANNESS_TYPES )
-        arg_support_string *= "Unsupported endianness type, run get_supported_endianness_types() to get the supported. "
     end
 
     if embedding_length < 1
@@ -150,17 +162,24 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
         SQLite.execute(db, "PRAGMA journal_mode = WAL;")
         SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
 
-        SQLite.execute(db, CREATE_MAIN_TABLE_STMT)
-        SQLite.execute(db, CREATE_META_TABLE_STMT)
+        SQLite.transaction(db) do
+            SQLite.execute(db, CREATE_MAIN_TABLE_STMT)
+            SQLite.execute(db, CREATE_META_TABLE_STMT)
 
-        rows = collect(SQLite.Query(db, META_SELECT_ALL_QUERY))
+            rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
 
-        if isempty(rows) #if empty, insert initial meta information
-            #in initial stage set embedding_count to 0 because no embeddings have been added yet
-            SQLite.execute(db, META_TABLE_FULL_ROW_INSERTION_STMT, (0, embedding_length, data_type, endianness))
+            if isempty(rows) #if empty, insert initial meta information
+                #in initial stage set embedding_count to 0 because no embeddings have been added yet
+                SQLite.execute(db, META_TABLE_FULL_ROW_INSERTION_STMT, (0, embedding_length, data_type, endianness, description))
+            end
         end
 
-        close_db(db)
+        if KEEP_DB_OPEN[] 
+            DB_HANDLE[] = db
+        else
+            close_db(db)
+        end
+
         return true
     catch e
         close_db(db)
