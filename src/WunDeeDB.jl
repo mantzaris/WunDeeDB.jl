@@ -7,7 +7,7 @@ using JSON3
 
 export get_supported_data_types,
         initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
-        get_meta_data,
+        get_meta_data, update_description,
         infer_data_type,
         insert_embeddings,
         delete_embeddings,
@@ -91,6 +91,7 @@ const META_TABLE_FULL_ROW_INSERTION_STMT = """
 
 const META_SELECT_ALL_QUERY = "SELECT * FROM $(META_DATA_TABLE_NAME)"
 const META_UPDATE_QUERY = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = ?"
+const META_UPDATE_DESCRIPTION = "UPDATE $(META_DATA_TABLE_NAME) SET description = ?"
 const META_RESET_STMT = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = 0"
 
 const INSERT_EMBEDDING_STMT = "INSERT INTO $MAIN_TABLE_NAME (id_text, embedding_blob) VALUES (?, ?)"
@@ -387,6 +388,7 @@ Retrieve meta data from the SQLite database.
 This function is overloaded to accept either an active database connection or a file path:
 - `get_meta_data(db::SQLite.DB)`: Retrieves the meta data from the given open database connection.
 - `get_meta_data(db_path::String)`: Opens the database at the specified path, retrieves the meta data, and then closes the connection.
+- neither approach will close the DB if a persistent handle is in use and tries to use the persistent one if possible.
 
 # Arguments
 - For `get_meta_data(db::SQLite.DB)`:
@@ -430,16 +432,84 @@ function get_meta_data(db::SQLite.DB)
 end
 
 function get_meta_data(db_path::String)
-    db = open_db(db_path)
+    # db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
     try
         result = get_meta_data(db)
-        close_db(db)
         return result
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
+
+
+
+"""
+Update the description in the metadata table.
+
+This function can be called in two ways:
+1. With an open SQLite.DB connection.
+2. With a database file path, which will open the connection if needed.
+
+It executes a parameterized query to update the description field. If an error occurs,
+the function closes the database connection, resets global connection variables, and returns an error message.
+
+Arguments:
+- `db::SQLite.DB` or `db_path::String`: A SQLite database connection or the path to the database file.
+- `description::String` (optional): The new description to set (defaults to an empty string).
+
+Returns:
+- true on success, or a string with the error message on failure
+"""
+function update_description(db::SQLite.DB, description::String="")
+    try
+        SQLite.execute(db, META_UPDATE_DESCRIPTION, (description,))
+    catch e
+        close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
+        return "Error: $(e)"
+    end
+
+    return true
+end
+function update_description(db_path::String, description::String="")
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
+    try
+        SQLite.execute(db, META_UPDATE_DESCRIPTION, (description,))
+    catch e
+        close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
+        return "Error: $(e)"
+    end
+end
+
+
+
+function update_meta(db::SQLite.DB, count::Int=1)
+    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    
+    if isempty(rows)
+        error("Meta data table is empty. The meta row should have been initialized during database setup.")
+    else
+        row = rows[1]
+        current_count = row.embedding_count
+        new_count = current_count + count
+        
+        SQLite.execute(db, META_UPDATE_QUERY, (new_count,))
+    end
+
+    return true
+end
+
+
+
 
 
 
@@ -469,19 +539,6 @@ end
 
 
 
-function update_meta(db::SQLite.DB, count::Int=1)
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
-    
-    if isempty(rows)
-        error("Meta data table is empty. The meta row should have been initialized during database setup.")
-    else
-        row = rows[1]
-        current_count = row.embedding_count
-        new_count = current_count + count
-        
-        SQLite.execute(db, META_UPDATE_QUERY, (new_count,))
-    end
-end
 
 
 
