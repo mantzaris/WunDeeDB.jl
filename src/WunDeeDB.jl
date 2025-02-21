@@ -622,7 +622,7 @@ function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
         error("Mismatch between number of IDs and embeddings")
     end
 
-    #see all embeddings have the same length.
+    #see all embeddings have the same length
     emb_length = length(embeddings[1])
     for e in embeddings
         if length(e) != emb_length
@@ -664,10 +664,10 @@ function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
 end
 
 function insert_embeddings(db_path::String, id_input, embedding_input)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
     try 
         msg = insert_embeddings(db, id_input, embedding_input)
-        close_db(db)
         return msg
     catch e
         close_db(db)
@@ -740,10 +740,11 @@ function delete_embeddings(db::SQLite.DB, id_input)
 end
 
 function delete_embeddings(db_path::String, id_input)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+    
     try
         result = delete_embeddings(db, id_input)
-        close_db(db)
+
         return result
     catch e
         close_db(db)
@@ -839,7 +840,11 @@ function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     #single update: check that the record exists
     if n == 1
         check_sql = "SELECT 1 AS found FROM $MAIN_TABLE_NAME WHERE id_text = ?" # TODO: make global constant
-        found_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(ids[1]),))))
+
+        found_rows = SQLite.transaction(db) do
+            collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(ids[1]),))))
+        end
+
         if isempty(found_rows)
             error("Record with id $(ids[1]) not found.")
         end
@@ -860,10 +865,11 @@ function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
 end
 
 function update_embeddings(db_path::String, id_input, new_embedding_input)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+    
     try
         result = update_embeddings(db, id_input, new_embedding_input)
-        close_db(db)
+
         return result
     catch e
         close_db(db)
@@ -899,9 +905,32 @@ function parse_data_type(dt::String)
 end
 
 function blob_to_embedding(blob::Vector{UInt8}, ::Type{T}) where T
-    # reinterpret produces a view; use collect to obtain a standard Julia array.
-    return collect(reinterpret(T, blob))
+    if IS_LITTLE_ENDIAN
+        return collect(reinterpret(T, blob))
+    else
+        # If the system is big-endian, swap the bytes back.
+        # Only perform swap if T occupies more than one byte.
+        if sizeof(T) == 1
+            return collect(reinterpret(T, blob))
+        else
+            swapped = if T <: Integer
+                bswap.(reinterpret(T, blob))
+            elseif T == Float16
+                bswap.(reinterpret(UInt16, blob))
+            elseif T == Float32
+                bswap.(reinterpret(UInt32, blob))
+            elseif T == Float64
+                bswap.(reinterpret(UInt64, blob))
+            elseif T in (Int128, UInt128)
+                bswap.(reinterpret(T, blob))
+            else
+                error("Type $T not supported for byte swapping")
+            end
+            return collect(reinterpret(T, reinterpret(UInt8, swapped)))
+        end
+    end
 end
+
 
 
 """
@@ -959,16 +988,21 @@ function get_embeddings(db::SQLite.DB, id_input)
     params = Tuple(string.(ids))
     
     #get rows from the main table
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
+    rows = SQLite.transaction(db) do
+        collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
+    end
     
     #get meta table information to determine the stored data type
-    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    meta_rows = SQLite.transaction(db) do
+        collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    end
+
     if isempty(meta_rows)
         error("Meta table is empty. The meta row should have been initialized during database setup.")
     end
     meta = meta_rows[1]
     dt_string = meta.data_type
-    T = parse_data_type(dt_string)
+    T = parse_data_type(dt_string) #TODO: keep as a persistant global variable
     
     #make a dictionary mapping id_text to its embedding vector
     result = Dict{String,Any}()
@@ -988,10 +1022,11 @@ function get_embeddings(db::SQLite.DB, id_input)
 end
 
 function get_embeddings(db_path::String, id_input)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
     try
         result = get_embeddings(db, id_input)
-        close_db(db)
+
         return result
     catch e
         close_db(db)
@@ -1031,10 +1066,15 @@ function random_embeddings(db::SQLite.DB, num::Int)
         ORDER BY RANDOM()
         LIMIT ?;
     """
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, (num,))))
+    rows = SQLite.transaction(db) do
+        collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, (num,))))
+    end
     
     #meta table info to determine the stored data type
-    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    meta_rows = SQLite.transaction(db) do
+        collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    end
+
     if isempty(meta_rows)
         error("Meta table is empty. The meta row should have been initialized during database setup.")
     end
@@ -1051,10 +1091,11 @@ function random_embeddings(db::SQLite.DB, num::Int)
 end
 
 function random_embeddings(db_path::String, num::Int)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
     try
         result = random_embeddings(db, num)
-        close_db(db)
+
         return result
     catch e
         close_db(db)
@@ -1123,7 +1164,7 @@ function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=t
         error("Invalid direction: $direction. Use :next or :previous.")
     end
 
-    #make the SQL query
+    #make the SQL query global TODO:
     if full_row
         query = """
             SELECT id_text, embedding_blob
@@ -1142,7 +1183,10 @@ function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=t
         """
     end
 
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (string(current_id),))))
+    rows = SQLite.transaction(db) do
+        collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (string(current_id),))))
+    end
+
     if isempty(rows)
         return nothing
     end
@@ -1152,7 +1196,10 @@ function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=t
         return row.id_text
     else
         #full_row retrieval, obtain the stored data type from the meta table
-        meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+        meta_rows = SQLite.transaction(db) do
+            collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+        end
+
         if isempty(meta_rows)
             error("Meta table is empty. The meta row should have been initialized during database setup.")
         end
@@ -1164,10 +1211,11 @@ function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=t
 end
 
 function get_adjacent_id(db_path::String, current_id; direction="next", full_row=true)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
     try
         result = get_adjacent_id(db, current_id; direction=direction, full_row=full_row)
-        close_db(db)
+
         return result
     catch e
         close_db(db)
@@ -1210,28 +1258,32 @@ println("Number of entries: ", entry_count)
 function count_entries(db::SQLite.DB; update_meta::Bool=false)
     stmt = "SELECT COUNT(*) AS count FROM $MAIN_TABLE_NAME"
     #the Tables interface for consistent row conversion
-    rows = collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
+    rows = SQLite.transaction(db) do
+        collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
+    end
+    
     count = rows[1].count
 
     if update_meta
-        if count > 0
-            update_stmt = "UPDATE $META_DATA_TABLE_NAME SET embedding_count = ?"
-            SQLite.execute(db, update_stmt, (count,))
-        else
-            #if count is 0, clear the meta information (embedding_count = 0 and embedding_length = NULL)
-            update_stmt = "UPDATE $META_DATA_TABLE_NAME SET embedding_count = 0"
-            SQLite.execute(db, update_stmt)
+        SQLite.transaction(db) do
+            if count > 0
+                SQLite.execute(db, "UPDATE $META_DATA_TABLE_NAME SET embedding_count = ?", (count,))
+            else
+                # If count is 0, clear the meta information (embedding_count = 0)
+                SQLite.execute(db, "UPDATE $META_DATA_TABLE_NAME SET embedding_count = 0")
+            end
         end
     end
-
+    
     return count
 end
 
 function count_entries(db_path::String; update_meta::Bool=false)
-    db = open_db(db_path)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
     try
         count = count_entries(db; update_meta=update_meta)
-        close_db(db)
+
         return count
     catch e
         close_db(db)
