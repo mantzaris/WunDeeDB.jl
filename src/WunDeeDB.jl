@@ -2,7 +2,7 @@ module WunDeeDB
 
 using SQLite
 using Tables, DBInterface
-using JSON3
+using DataFrames
 
 
 export get_supported_data_types,
@@ -104,9 +104,6 @@ Returns a sorted vector of supported data type names as strings.
 function get_supported_data_types()::Vector{String}
     return sort(collect(keys(DATA_TYPE_MAP)))
 end
-
-
-
 
 
 
@@ -422,11 +419,12 @@ end
 """
 function get_meta_data(db::SQLite.DB)
     stmt = "SELECT * FROM $META_DATA_TABLE_NAME"
-    rows = collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
-    if isempty(rows)
+    df = DBInterface.execute(db, stmt) |> DataFrame
+
+    if isempty(df)
         return nothing
     else
-        return rows[1]
+        return df
     end
 end
 
@@ -466,7 +464,7 @@ Returns:
 """
 function update_description(db::SQLite.DB, description::String="")
     try
-        SQLite.execute(db, META_UPDATE_DESCRIPTION, (description,))
+        DBInterface.execute(db, META_UPDATE_DESCRIPTION, (description,)) #SQLite.execute(db, META_UPDATE_DESCRIPTION, (description,))
     catch e
         close_db(db)
         DB_HANDLE[] = nothing
@@ -480,7 +478,7 @@ function update_description(db_path::String, description::String="")
     db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
 
     try
-        SQLite.execute(db, META_UPDATE_DESCRIPTION, (description,))
+        DBInterface.execute(db, META_UPDATE_DESCRIPTION, (description,)) #SQLite.execute(db, META_UPDATE_DESCRIPTION, (description,))
     catch e
         close_db(db)
         DB_HANDLE[] = nothing
@@ -492,16 +490,17 @@ end
 
 
 function update_meta(db::SQLite.DB, count::Int=1)
-    rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    #rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    df = DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame
     
-    if isempty(rows)
+    if isempty(df)
         error("Meta data table is empty. The meta row should have been initialized during database setup.")
     else
-        row = rows[1]
+        row = df[1,:]
         current_count = row.embedding_count
         new_count = current_count + count
         
-        SQLite.execute(db, META_UPDATE_QUERY, (new_count,))
+        DBInterface.execute(db, META_UPDATE_QUERY, (new_count,))
     end
 
     return true
@@ -525,7 +524,6 @@ Infer the data type of the elements in a numeric embedding vector.
 ```julia
 vec = [1.0, 2.0, 3.0]
 println(infer_data_type(vec))  # "Float64"
-
 """
 function infer_data_type(embedding::AbstractVector{<:Number})
     return string(eltype(embedding))
@@ -603,7 +601,6 @@ if result === true
 else
     println("Error: ", result)
 end
-
 """
 function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
     #if a single ID or embedding is passed, wrap it in a one-element array
@@ -633,13 +630,13 @@ function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
     local inferred_data_type = infer_data_type(embeddings[1]) #see data type from the first embedding
 
     #retrieve meta table information using DBInterface.execute with Tables.namedtupleiterator
-    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    meta_df = DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
     
-    if isempty(meta_rows)
+    if isempty(meta_df)
         error("Meta table is empty. The meta row should have been initialized during database setup.")
     end
     
-    meta = meta_rows[1]
+    meta = meta_df[1,:]
     
     if meta.embedding_length != emb_length
         error("Embedding length mismatch: meta table has embedding_length=$(meta.embedding_length) but new embeddings have length=$(emb_length)")
@@ -654,10 +651,10 @@ function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
     #embedding insertion and meta update within a transaction.
     SQLite.transaction(db) do
         for p in params
-            SQLite.execute(db, INSERT_EMBEDDING_STMT, p)
+            DBInterface.execute(db, INSERT_EMBEDDING_STMT, p) #SQLite.execute(db, INSERT_EMBEDDING_STMT, p)
         end
-        # Update the meta table by incrementing embedding_count by n.
-        update_meta(db, count=n)
+        #update the meta table by incrementing embedding_count by n
+        update_meta(db, n)
     end
 
     return true
@@ -671,6 +668,8 @@ function insert_embeddings(db_path::String, id_input, embedding_input)
         return msg
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
@@ -718,7 +717,7 @@ end
 
 """
 function delete_embeddings(db::SQLite.DB, id_input)
-    #if a single ID is passed, wrap it in a one-element array
+    #a single ID is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? map(string, id_input) : [string(id_input)]
     n = length(ids)
     if n == 0
@@ -730,9 +729,9 @@ function delete_embeddings(db::SQLite.DB, id_input)
         placeholders = join(fill("?", n), ", ")
         stmt = "DELETE FROM $MAIN_TABLE_NAME WHERE id_text IN ($placeholders)"
         params = Tuple(ids)
-        SQLite.execute(db, stmt, params)
+        DBInterface.execute(db, stmt, params)
         
-        #update the meta table for bulk deletion, this function should subtract 'n' from the meta embedding_count
+        #update the meta table for bulk deletion: subtract 'n' from the meta embedding_count
         update_meta(db, -n)
     end
 
@@ -740,17 +739,24 @@ function delete_embeddings(db::SQLite.DB, id_input)
 end
 
 function delete_embeddings(db_path::String, id_input)
+    #check for an empty vector
+    if (id_input isa AbstractVector) && isempty(id_input)
+        return "Error: No IDs provided for deletion."
+    end
+
     db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
     
     try
         result = delete_embeddings(db, id_input)
-
         return result
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
+
 
 
 
@@ -794,6 +800,7 @@ else
 end
 
 """
+# XXX df = DBInterface.execute(db, stmt) |> DataFrame
 function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     #wrap a single ID or embedding into a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
@@ -1257,20 +1264,16 @@ println("Number of entries: ", entry_count)
 """
 function count_entries(db::SQLite.DB; update_meta::Bool=false)
     stmt = "SELECT COUNT(*) AS count FROM $MAIN_TABLE_NAME"
-    #the Tables interface for consistent row conversion
-    rows = SQLite.transaction(db) do
-        collect(Tables.namedtupleiterator(SQLite.execute(db, stmt)))
-    end
-    
-    count = rows[1].count
+    rows = DBInterface.execute(db, stmt) |> DataFrame
+    count = rows[1,:].count
 
     if update_meta
         SQLite.transaction(db) do
             if count > 0
-                SQLite.execute(db, "UPDATE $META_DATA_TABLE_NAME SET embedding_count = ?", (count,))
+                DBInterface.execute(db, "UPDATE $META_DATA_TABLE_NAME SET embedding_count = ?", (count,))
             else
                 # If count is 0, clear the meta information (embedding_count = 0)
-                SQLite.execute(db, "UPDATE $META_DATA_TABLE_NAME SET embedding_count = 0")
+                DBInterface.execute(db, "UPDATE $META_DATA_TABLE_NAME SET embedding_count = 0")
             end
         end
     end
