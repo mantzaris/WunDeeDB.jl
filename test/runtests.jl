@@ -453,7 +453,6 @@ end
     total_after2 = count_entries(TEST_DB)
     @test total_after2 == 0
     
-    println("foo")
     #passing an empty vector should return an error message
     err_msg = delete_embeddings(TEST_DB, String[])
     @test err_msg !== true
@@ -467,5 +466,344 @@ end
 
 
 
+@testset "update_embeddings tests" begin
+    #clean up any pre-existing test files
+    for f in readdir(".")
+        if startswith(f, "temp_update_embeddings")
+            rm(f; force=true)
+        end
+    end
+
+    local TEST_DB = "temp_update_embeddings.sqlite"
+
+    #initialize the database embedding_length = 128, data_type = "Float32"
+    res_init = initialize_db(TEST_DB, 128, "Float32",
+                             description="test embeddings",
+                             keep_conn_open=false)
+    @test res_init === true
+
+    #insert an embedding for testing updates
+    emb = Float32.(rand(128))
+    res_ins = insert_embeddings(TEST_DB, "emb1", emb)
+    @test res_ins === true
+
+    #update an existing record with a valid new embedding use Float32(0.1) to keep the vector in Float32
+    new_emb = emb .+ Float32(0.1)
+    res_upd = update_embeddings(TEST_DB, "emb1", new_emb)
+    @test res_upd === true
+
+    #update a record that does not exist before negative tests (#2 and #3) to ensure the DB is still open and EmbeddingsMetaData is present
+    err_msg3 = update_embeddings(TEST_DB, "nonexistent", new_emb)
+    @test occursin("Record with id nonexistent not found", err_msg3)
+
+    #mismatched IDs and embeddings (should trigger an error) the DB to close in your catch block
+    err_msg = update_embeddings(TEST_DB, ["emb1", "emb2"], [new_emb])
+    @test occursin("Mismatch between number of IDs and new embeddings", err_msg)
+
+    #passing an invalid type for new_embedding_input
+    err_msg2 = update_embeddings(TEST_DB, "emb1", "invalid type")
+    @test occursin("Invalid type for new_embedding_input", err_msg2)
+
+    #clean up: remove the test files
+    for f in readdir(".")
+        if startswith(f, "temp_update_embeddings")
+            rm(f; force=true)
+        end
+    end
+end
 
 
+
+
+@testset "get_embeddings tests" begin
+    #clean up pre-existing test files
+    local TEST_DB = "temp_get_embeddings.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_get_embeddings")
+            rm(f; force=true)
+        end
+    end
+
+    #initialize a fresh DB (embedding_length=3 for simplicity)
+    res_init = initialize_db(TEST_DB, 3, "Float32", description="test embeddings", keep_conn_open=false)
+    @test res_init === true
+
+    #isert some test embeddings
+    emb1 = Float32[0.1, 0.2, 0.3]
+    emb2 = Float32[1.0, 2.0, 3.0]
+
+    res_ins1 = insert_embeddings(TEST_DB, "id1", emb1)
+    @test res_ins1 === true
+
+    res_ins2 = insert_embeddings(TEST_DB, "id2", emb2)
+    @test res_ins2 === true
+
+    #retrieving a single existing ID
+    res_get1 = get_embeddings(TEST_DB, "id1")
+    @test res_get1 == emb1  # expect a single vector
+
+    #retrieving multiple IDs
+    res_get_multi = get_embeddings(TEST_DB, ["id1", "id2"])
+    @test length(res_get_multi) == 2
+    @test haskey(res_get_multi, "id1") && haskey(res_get_multi, "id2")
+    @test res_get_multi["id1"] == emb1
+    @test res_get_multi["id2"] == emb2
+
+    #retrieving a nonexistent ID (single)
+    res_get_nonexistent = get_embeddings(TEST_DB, "no_such_id")
+    @test res_get_nonexistent === nothing
+
+    #retrieving a mix of existing and nonexistent IDs
+    res_get_partial = get_embeddings(TEST_DB, ["id1", "no_such_id", "id2"])
+    @test length(res_get_partial) == 2
+    @test haskey(res_get_partial, "id1")
+    @test haskey(res_get_partial, "id2")
+    @test !haskey(res_get_partial, "no_such_id")
+
+    #passing an empty array of IDs => should error
+    @test true !== get_embeddings(TEST_DB, String[])
+
+    #clean up
+    for f in readdir(".")
+        if startswith(f, "temp_get_embeddings")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+
+
+@testset "random_embeddings tests" begin
+    #
+    # 1. Clean up any existing test files
+    #
+    local TEST_DB = "temp_random_embeddings.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_random_embeddings")
+            rm(f; force=true)
+        end
+    end
+
+    res_init = initialize_db(TEST_DB, 3, "Float32", description="random test", keep_conn_open=false)
+    @test res_init === true
+
+
+    # 3. Insert some sample embeddings
+    emb_ids = ["id$(i)" for i in 1:5]  # 5 distinct IDs
+    emb_values = [
+        Float32[0.1f0, 0.2f0, 0.3f0],
+        Float32[1.0f0, 2.0f0, 3.0f0],
+        Float32[0.5f0, 0.5f0, 0.5f0],
+        Float32[3.14f0, 1.59f0, 2.65f0],
+        Float32[9.99f0, 9.88f0, 9.77f0]
+    ]
+
+    for (i, id) in enumerate(emb_ids)
+        res_ins = insert_embeddings(TEST_DB, id, emb_values[i])
+        @test res_ins === true
+    end
+
+    # 4. Test A: Simple random selection within valid range
+    #    e.g., request 2 random embeddings out of the 5
+    rand_res_2 = random_embeddings(TEST_DB, 2)
+    # We expect a Dict{String,Any} with 2 distinct keys
+    @test length(rand_res_2) == 2
+    @test all(in(emb_ids), keys(rand_res_2))  # the selected IDs should be among the 5
+
+    # There's no strict guarantee which IDs we get (because it's random),
+    # but we can check the dictionary keys are a subset of the set of inserted IDs.
+    # Also verify each vector has length 3
+    for (id_key, vec) in rand_res_2
+        @test haskey(rand_res_2, id_key)  # trivially true, but for demonstration
+        @test length(vec) == 3
+    end
+
+    #
+    # 5. Test B: num > total number of rows
+    #    e.g., request 10 from a table that only has 5
+    #
+    rand_res_10 = random_embeddings(TEST_DB, 10)
+    @test length(rand_res_10) <= 5  # SQLite returns at most 5
+    for (id_key, vec) in rand_res_10
+        @test id_key in emb_ids
+        @test length(vec) == 3
+    end
+
+    #
+    # 6. Test C: num = 0
+    #    Typically returns an empty dictionary, but let's see what your code does
+    #
+    rand_res_0 = random_embeddings(TEST_DB, 0)
+    @test length(rand_res_0) == 0  # no rows expected
+
+    #
+    # 7. Test D: Negative num
+    #    If you want to allow it, you'll get zero rows. If you want to disallow it, you might throw an error.
+    #    Suppose your code does not handle it specifically, so we expect 0 rows or an error.
+    #
+    rand_res_neg = random_embeddings(TEST_DB, -1)
+    @test rand_res_neg !== true  # or handle error if your function does so
+    
+    #
+    # 8. Clean up
+    #
+    for f in readdir(".")
+        if startswith(f, "temp_random_embeddings")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+
+@testset "get_adjacent_id tests" begin
+    #clean up any existing testDB files
+    local TEST_DB = "temp_get_adjacent_id.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_get_adjacent_id")
+            rm(f; force=true)
+        end
+    end
+
+    #initialize a DB with data
+    #assume embedding_length=3, data_type="Float32"
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+        description="adjacent test",
+        keep_conn_open=false)
+    @test res_init === true
+
+    #insert test rows
+    #insert 3 IDs in ascending order: "alpha", "beta", "gamma"
+    emb_alpha = Float32[0.1, 0.2, 0.3]
+    emb_beta  = Float32[0.4, 0.5, 0.6]
+    emb_gamma = Float32[0.7, 0.8, 0.9]
+
+    @test insert_embeddings(TEST_DB, "alpha", emb_alpha) === true
+    @test insert_embeddings(TEST_DB, "beta",  emb_beta)  === true
+    @test insert_embeddings(TEST_DB, "gamma", emb_gamma) === true
+
+    #test "next" logic
+    res_alpha_next = get_adjacent_id(TEST_DB, "alpha"; direction="next", full_row=false)
+    @test res_alpha_next == "beta"
+
+    #from "beta" => "gamma"
+    res_beta_next = get_adjacent_id(TEST_DB, "beta"; direction="next", full_row=false)
+    @test res_beta_next == "gamma"
+
+
+    #from "gamma" => nothing (there is no lexicographically larger ID)
+    res_gamma_next = get_adjacent_id(TEST_DB, "gamma"; direction="next", full_row=false)
+    @test res_gamma_next === nothing
+
+    #"previous" logic
+    res_gamma_prev = get_adjacent_id(TEST_DB, "gamma"; direction="previous", full_row=false)
+    @test res_gamma_prev == "beta"
+
+    #previous from "beta" => "alpha"
+    res_beta_prev = get_adjacent_id(TEST_DB, "beta"; direction="prev", full_row=false)
+    @test res_beta_prev == "alpha"
+
+    #previous from "alpha" => nothing (no smaller ID)
+    res_alpha_prev = get_adjacent_id(TEST_DB, "alpha"; direction="previous", full_row=false)
+    @test res_alpha_prev === nothing
+
+    #test "full_row=true"
+    #expect a named tuple: (id_text, embedding, data_type)
+    #from "alpha" => should return "beta"
+    res_alpha_next_full = get_adjacent_id(TEST_DB, "alpha"; direction="next", full_row=true)
+    @test res_alpha_next_full !== nothing
+    @test res_alpha_next_full.id_text == "beta"
+    @test res_alpha_next_full.data_type == "Float32"
+    @test res_alpha_next_full.embedding == emb_beta
+
+    #invalid direction => should error
+    @test true !== get_adjacent_id(TEST_DB, "alpha"; direction="invalid_dir")
+
+    #clean up
+    for f in readdir(".")
+        if startswith(f, "temp_get_adjacent_id")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+
+@testset "count_entries tests" begin
+    #clean up any existing test DB files
+    local TEST_DB = "temp_count_entries.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_count_entries")
+            rm(f; force=true)
+        end
+    end
+
+    res_init = initialize_db(TEST_DB, 3, "Float32", 
+                             description="test count_entries", 
+                             keep_conn_open=false)
+    @test res_init === true
+
+    #confirm that count_entries is 0 initially, and meta is 0 if we update it
+    c0 = count_entries(TEST_DB)  # By default, update_meta=false
+    @test c0 == 0  # Table is empty after initialization
+
+    #with update_meta=true
+    c0_update = count_entries(TEST_DB; update_meta=true)
+    @test c0_update == 0
+
+    #verify meta table embedding_count is 0
+    df_meta_0 = DBInterface.execute(open_db(TEST_DB), 
+        "SELECT embedding_count FROM $(WunDeeDB.META_DATA_TABLE_NAME)") |> DataFrame
+    @test df_meta_0[1, :embedding_count] == 0
+        
+    #insert some rows and confirm the count changes
+    emb1 = Float32[0.1, 0.2, 0.3]
+    emb2 = Float32[0.4, 0.5, 0.6]
+    insert_embeddings(TEST_DB, "id1", emb1)
+    insert_embeddings(TEST_DB, "id2", emb2)
+
+    #check new count without updating meta
+    c2 = count_entries(TEST_DB)  # update_meta=false
+    @test c2 == 2
+          
+    df_meta_after_insert = DBInterface.execute(open_db(TEST_DB), 
+        "SELECT embedding_count FROM $(WunDeeDB.META_DATA_TABLE_NAME)") |> DataFrame
+    @test df_meta_after_insert[1, :embedding_count] == 2
+    
+    #update meta
+    c2_up = count_entries(TEST_DB; update_meta=true)
+    @test c2_up == 2
+    
+    df_meta_after_update = DBInterface.execute(open_db(TEST_DB), 
+        "SELECT embedding_count FROM $(WunDeeDB.META_DATA_TABLE_NAME)") |> DataFrame
+    @test df_meta_after_update[1, :embedding_count] == 2
+
+    #insert more rows, check count, etc
+    emb3 = Float32[1.0, 2.0, 3.0]
+    insert_embeddings(TEST_DB, "id3", emb3)
+
+    c3 = count_entries(TEST_DB; update_meta=false)
+    @test c3 == 3  # total rows
+    
+    #confirm meta is still 2 because we didn't update it
+    df_meta_unchanged = DBInterface.execute(open_db(TEST_DB), 
+        "SELECT embedding_count FROM $(WunDeeDB.META_DATA_TABLE_NAME)") |> DataFrame
+    @test df_meta_unchanged[1, :embedding_count] == 3
+
+    c3_up = count_entries(TEST_DB; update_meta=true)
+    @test c3_up == 3
+    df_meta_final = DBInterface.execute(open_db(TEST_DB),
+        "SELECT embedding_count FROM $(WunDeeDB.META_DATA_TABLE_NAME)") |> DataFrame
+    @test df_meta_final[1, :embedding_count] == 3
+
+    #clean up
+    for f in readdir(".")
+        if startswith(f, "temp_count_entries")
+            rm(f; force=true)
+        end
+    end
+end

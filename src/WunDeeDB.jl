@@ -800,7 +800,6 @@ else
 end
 
 """
-# XXX df = DBInterface.execute(db, stmt) |> DataFrame
 function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     #wrap a single ID or embedding into a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
@@ -830,11 +829,11 @@ function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     local inferred_data_type = infer_data_type(new_embeddings[1])
 
     #get meta table information using the Tables interface
-    meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
-    if isempty(meta_rows)
+    meta_df = DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #meta_rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+    if isempty(meta_df)
         error("Meta table is empty. The meta row should have been initialized during database setup.")
     end
-    meta = meta_rows[1]
+    meta = meta_df[1,:]
     
     #new embedding dimensions and data_type also match the meta table?
     if meta.embedding_length != new_emb_length
@@ -847,9 +846,9 @@ function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     #single update: check that the record exists
     if n == 1
         check_sql = "SELECT 1 AS found FROM $MAIN_TABLE_NAME WHERE id_text = ?" # TODO: make global constant
-
+        # found_rows = DBInterface.execute(db, check_sql, (string(ids[1]),)) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(ids[1]),))))
         found_rows = SQLite.transaction(db) do
-            collect(Tables.namedtupleiterator(DBInterface.execute(db, check_sql, (string(ids[1]),))))
+            DBInterface.execute(db, check_sql, (string(ids[1]),)) |> DataFrame
         end
 
         if isempty(found_rows)
@@ -864,7 +863,7 @@ function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     SQLite.transaction(db) do
         for i in 1:n
             local blob = embedding_to_blob(new_embeddings[i])
-            SQLite.execute(db, update_stmt, (blob, string(ids[i])))
+            DBInterface.execute(db, update_stmt, (blob, string(ids[i]))) #SQLite.execute(db, update_stmt, (blob, string(ids[i])))
         end
     end
 
@@ -880,6 +879,8 @@ function update_embeddings(db_path::String, id_input, new_embedding_input)
         return result
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
@@ -996,30 +997,30 @@ function get_embeddings(db::SQLite.DB, id_input)
     
     #get rows from the main table
     rows = SQLite.transaction(db) do
-        collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
+        DBInterface.execute(db, stmt, params) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
     end
     
     #get meta table information to determine the stored data type
     meta_rows = SQLite.transaction(db) do
-        collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+        DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
     end
 
     if isempty(meta_rows)
         error("Meta table is empty. The meta row should have been initialized during database setup.")
     end
-    meta = meta_rows[1]
+    meta = meta_rows[1,:]
     dt_string = meta.data_type
     T = parse_data_type(dt_string) #TODO: keep as a persistant global variable
-    
+
     #make a dictionary mapping id_text to its embedding vector
     result = Dict{String,Any}()
-    for row in rows
+    for row in eachrow(rows)
         id = row.id_text
         blob = row.embedding_blob  # this is a Vector{UInt8}
         embedding_vec = blob_to_embedding(blob, T)
         result[string(id)] = embedding_vec
     end
-    
+
     #only one ID was requested, return its embedding directly (or nothing if not found)
     if n == 1
         return isempty(result) ? nothing : first(values(result))
@@ -1037,6 +1038,8 @@ function get_embeddings(db_path::String, id_input)
         return result
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
@@ -1066,6 +1069,10 @@ end
 
 """ 
 function random_embeddings(db::SQLite.DB, num::Int)
+    if num < 0
+        error("random_embeddings: negative limit ($num) is not allowed.")
+    end
+
     # TODO: global stmt
     stmt = """
         SELECT id_text, embedding_blob
@@ -1074,23 +1081,23 @@ function random_embeddings(db::SQLite.DB, num::Int)
         LIMIT ?;
     """
     rows = SQLite.transaction(db) do
-        collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, (num,))))
+        DBInterface.execute(db, stmt, (num,)) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, (num,))))
     end
     
     #meta table info to determine the stored data type
     meta_rows = SQLite.transaction(db) do
-        collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+        DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
     end
 
     if isempty(meta_rows)
         error("Meta table is empty. The meta row should have been initialized during database setup.")
     end
-    meta = meta_rows[1]
+    meta = meta_rows[1,:]
     T = parse_data_type(meta.data_type)
     
     #make the result dictionary mapping id_text to the embedding vector
     result = Dict{String,Any}()
-    for row in rows
+    for row in eachrow(rows)
         embedding_vec = blob_to_embedding(row.embedding_blob, T)
         result[string(row.id_text)] = embedding_vec
     end
@@ -1102,10 +1109,11 @@ function random_embeddings(db_path::String, num::Int)
 
     try
         result = random_embeddings(db, num)
-
         return result
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
@@ -1191,26 +1199,26 @@ function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=t
     end
 
     rows = SQLite.transaction(db) do
-        collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (string(current_id),))))
+        DBInterface.execute(db, query, (string(current_id),)) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, query, (string(current_id),))))
     end
 
     if isempty(rows)
         return nothing
     end
-    row = rows[1]
+    row = rows[1,:]
     
     if !full_row
         return row.id_text
     else
         #full_row retrieval, obtain the stored data type from the meta table
         meta_rows = SQLite.transaction(db) do
-            collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+            DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
         end
 
         if isempty(meta_rows)
             error("Meta table is empty. The meta row should have been initialized during database setup.")
         end
-        meta = meta_rows[1]
+        meta = meta_rows[1,:]
         T = parse_data_type(meta.data_type)
         embedding_vec = blob_to_embedding(row.embedding_blob, T)
         return (id_text = row.id_text, embedding = embedding_vec, data_type = meta.data_type)
@@ -1226,6 +1234,8 @@ function get_adjacent_id(db_path::String, current_id; direction="next", full_row
         return result
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
@@ -1290,6 +1300,8 @@ function count_entries(db_path::String; update_meta::Bool=false)
         return count
     catch e
         close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
         return "Error: $(e)"
     end
 end
