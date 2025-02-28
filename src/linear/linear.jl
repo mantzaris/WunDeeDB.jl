@@ -1,7 +1,14 @@
 
 
 
-#TODO: test xxx
+"""
+    linear_search_iteration(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+
+Performs a brute-force linear search by iterating over each embedding in the database using
+`get_adjacent_id`. Computes the distance to `query_embedding` according to `metric` and
+returns the top `top_k` nearest results, sorted by ascending distance. Each result is a 
+tuple `(distance, id_text)`.
+"""
 function linear_search_iteration(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
     pq = BinaryMaxHeap{Tuple{Float64,String}}()
 
@@ -23,8 +30,23 @@ function linear_search_iteration(db_path::String, query_embedding::AbstractVecto
     return sort(collect(pq), by=x->x[1])
 end
 
-#TODO: test xxx
-function linear_search_ids(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+"""
+    linear_search_ids(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+
+Performs a brute-force linear search by fetching all IDs at once (`get_all_ids`) and 
+computing the distance to `query_embedding` for each. Maintains the `top_k` closest 
+results, returning them sorted by ascending distance as tuples `(distance, id_text)`.
+
+# Example
+
+```julia
+results = linear_search_ids("my_database.sqlite", my_query_embedding, "euclidean"; top_k=5)
+for (dist, id) in results
+    println("ID: ", id, "  Distance: ", dist)
+end
+```
+
+"""function linear_search_ids(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
     all_ids = get_all_ids(db_path)
     pq = BinaryMaxHeap{Tuple{Float64,String}}()
     
@@ -45,8 +67,25 @@ function linear_search_ids(db_path::String, query_embedding::AbstractVector, met
     return sort(collect(pq), by=x->x[1])
 end
 
-#TODO: test xxx
-function linear_search_ids_batched(db_path::String, query_embedding::AbstractVector, metric::String;
+"""
+    linear_search_ids_batched(db_path::String, query_embedding::AbstractVector, metric::String;
+                              top_k::Int=5, batch_size::Int=1000)
+
+Performs a brute-force linear search in batches. All IDs are fetched, then processed 
+in chunks of size `batch_size` to reduce the overhead of multiple small queries. 
+Returns the `top_k` nearest neighbors as `(distance, id_text)` tuples, sorted by 
+ascending distance.
+
+# Example
+
+```julia
+results = linear_search_ids_batched("my_database.sqlite", my_query_embedding, "cosine"; top_k=5, batch_size=500)
+for (dist, id) in results
+    println("ID: ", id, "  Distance: ", dist)
+end
+```
+
+"""function linear_search_ids_batched(db_path::String, query_embedding::AbstractVector, metric::String;
     top_k::Int=5, batch_size::Int=1000)
 
     all_ids = get_all_ids(db_path)
@@ -82,8 +121,23 @@ function linear_search_ids_batched(db_path::String, query_embedding::AbstractVec
 end
 
 
-#TODO: test xxx
-function linear_search_all_embeddings(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+"""
+    linear_search_all_embeddings(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+
+Performs a brute-force search by loading all embeddings at once with `get_all_embeddings`.
+Computes distances to `query_embedding` and maintains the `top_k` closest results, which 
+are returned as `(distance, id_text)` tuples in ascending distance order.
+
+# Example
+
+```julia
+results = linear_search_all_embeddings("my_database.sqlite", my_query_embedding, "euclidean"; top_k=3)
+for (dist, id) in results
+    println("ID: ", id, " Distance: ", dist)
+end
+```
+
+"""function linear_search_all_embeddings(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
     all_embs = get_all_embeddings(db_path)
     
     pq = BinaryMaxHeap{Tuple{Float64,String}}()

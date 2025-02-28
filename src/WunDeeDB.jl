@@ -15,13 +15,14 @@ export get_supported_data_types,
         delete_embeddings,
         update_embeddings,
         get_embeddings,
+        get_all_ids,
+        get_all_embeddings,
         random_embeddings, 
         get_adjacent_id,
         count_entries
 
-
 export supported_distance_metrics #from: distance_metrics/distance_metrics.jl
-
+export linear_search_iteration, linear_search_ids, linear_search_ids_batched, linear_search_all_embeddings #from: linear/linear.jl
 
 ###################
 #TODO:
@@ -1048,7 +1049,20 @@ function get_embeddings(db_path::String, id_input)
     end
 end
 
-#TODO: xxx test and document
+"""
+    get_all_embeddings(db::SQLite.DB)
+    get_all_embeddings(db_path::String)
+
+Fetches all embeddings from the main table, converting raw BLOB data into typed vectors.  
+Returns a `Dict{String, Any}` mapping each `id_text` to its corresponding embedding.
+
+**Method 1**: `get_all_embeddings(db::SQLite.DB)`  
+Uses the provided open database connection.
+
+**Method 2**: `get_all_embeddings(db_path::String)`  
+Opens a database (or reuses a global handle) from the given path. On success, returns the same
+dictionary of embeddings; on error, returns a string describing the error.
+"""
 function get_all_embeddings(db::SQLite.DB)
     meta_rows = SQLite.transaction(db) do
         DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame
@@ -1076,7 +1090,6 @@ function get_all_embeddings(db::SQLite.DB)
     return result
 end
 
-#TODO: test xxx
 function get_all_embeddings(db_path::String)
     db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
     
@@ -1092,7 +1105,16 @@ function get_all_embeddings(db_path::String)
 end
 
 
-#TODO: xxx test and docs
+"""
+    get_all_ids(db::SQLite.DB)
+    get_all_ids(db_path::String)
+
+Retrieves all `id_text` values from the main table, returning them as a `Vector{String}`.
+
+- **get_all_ids(db::SQLite.DB)**: Uses the provided open database connection.
+- **get_all_ids(db_path::String)**: Opens or reuses a global DB connection from the given path;
+  returns the same vector of IDs on success or an error string on failure.
+"""
 function get_all_ids(db::SQLite.DB)
     stmt = "SELECT id_text FROM $MAIN_TABLE_NAME"
     
@@ -1103,7 +1125,6 @@ function get_all_ids(db::SQLite.DB)
     return rows[:, :id_text]
 end
 
-#TODO: test xxx
 function get_all_ids(db_path::String)
     db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
 
