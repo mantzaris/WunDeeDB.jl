@@ -46,7 +46,8 @@ for (dist, id) in results
 end
 ```
 
-"""function linear_search_ids(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+"""
+function linear_search_ids(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
     all_ids = get_all_ids(db_path)
     pq = BinaryMaxHeap{Tuple{Float64,String}}()
     
@@ -85,7 +86,8 @@ for (dist, id) in results
 end
 ```
 
-"""function linear_search_ids_batched(db_path::String, query_embedding::AbstractVector, metric::String;
+"""
+function linear_search_ids_batched(db_path::String, query_embedding::AbstractVector, metric::String;
     top_k::Int=5, batch_size::Int=1000)
 
     all_ids = get_all_ids(db_path)
@@ -137,7 +139,8 @@ for (dist, id) in results
 end
 ```
 
-"""function linear_search_all_embeddings(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+"""
+function linear_search_all_embeddings(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
     all_embs = get_all_embeddings(db_path)
     
     pq = BinaryMaxHeap{Tuple{Float64,String}}()

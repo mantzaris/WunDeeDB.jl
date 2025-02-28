@@ -1336,7 +1336,6 @@ function get_adjacent_id(db_path::String, current_id; direction="next", full_row
 end
 
 
-#TODO: test XXX
 function get_minimum_id(db::SQLite.DB)
     stmt = "SELECT id_text FROM $(MAIN_TABLE_NAME) ORDER BY id_text ASC LIMIT 1"
     rows = DBInterface.execute(db, stmt) |> DataFrame
