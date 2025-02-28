@@ -3,6 +3,8 @@ using Test
 using SQLite
 using DataFrames
 using DBInterface, Tables
+using DataStructures 
+
 
 
 
@@ -415,57 +417,6 @@ end
 
 
 
-@testset "delete_embeddings tests" begin
-    local TEST_DB = "temp_delete_embeddings.sqlite"
-    
-    # clean up any pre-existing test files
-    for f in readdir(".")
-        if startswith(f, "temp_delete_embeddings")
-            rm(f; force=true)
-        end
-    end
-
-    #initialize the database
-    res_init = initialize_db(TEST_DB, 128, "Float32", description="test embeddings", keep_conn_open=false)
-    @test res_init === true
-    return
-    #insert test embeddings
-    emb1 = Float32.(rand(128))
-    emb2 = Float32.(rand(128))
-    
-    res_ins1 = insert_embeddings(TEST_DB, "emb1", emb1)
-    res_ins2 = insert_embeddings(TEST_DB, "emb2", emb2)
-    @test res_ins1 === true
-    @test res_ins2 === true
-
-    total_before = count_entries(TEST_DB)
-    @test total_before == 2
-    
-    #delete a single embedding by ID
-    res_del1 = delete_embeddings(TEST_DB, "emb1")
-    @test res_del1 === true
-    total_after1 = count_entries(TEST_DB)
-    @test total_after1 == 1
-
-    #delete remaining embedding using an array
-    res_del2 = delete_embeddings(TEST_DB, ["emb2"])
-    @test res_del2 === true
-    total_after2 = count_entries(TEST_DB)
-    @test total_after2 == 0
-    
-    #passing an empty vector should return an error message
-    err_msg = delete_embeddings(TEST_DB, String[])
-    @test err_msg !== true
-    
-    for f in readdir(".")
-        if startswith(f, "temp_delete_embeddings")
-            rm(f; force=true)
-        end
-    end
-end
-
-
-
 @testset "update_embeddings tests" begin
     #clean up any pre-existing test files
     for f in readdir(".")
@@ -813,7 +764,396 @@ end
 
 
 
+@testset "delete_embeddings tests" begin
+    local TEST_DB = "temp_delete_embeddings.sqlite"
+    
+    # clean up any pre-existing test files
+    for f in readdir(".")
+        if startswith(f, "temp_delete_")
+            rm(f; force=true)
+        end
+    end
+
+    #initialize the database
+    res_init = initialize_db(TEST_DB, 128, "Float32", description="test embeddings", keep_conn_open=false)
+    @test res_init === true
+    return
+    #insert test embeddings
+    emb1 = Float32.(rand(128))
+    emb2 = Float32.(rand(128))
+    
+    res_ins1 = insert_embeddings(TEST_DB, "emb1", emb1)
+    res_ins2 = insert_embeddings(TEST_DB, "emb2", emb2)
+    @test res_ins1 === true
+    @test res_ins2 === true
+
+    total_before = count_entries(TEST_DB)
+    @test total_before == 2
+    
+    #delete a single embedding by ID
+    res_del1 = delete_embeddings(TEST_DB, "emb1")
+    @test res_del1 === true
+    total_after1 = count_entries(TEST_DB)
+    @test total_after1 == 1
+
+    #delete remaining embedding using an array
+    res_del2 = delete_embeddings(TEST_DB, ["emb2"])
+    @test res_del2 === true
+    total_after2 = count_entries(TEST_DB)
+    @test total_after2 == 0
+    
+    #passing an empty vector should return an error message
+    err_msg = delete_embeddings(TEST_DB, String[])
+    @test err_msg !== true
+    
+    for f in readdir(".")
+        if startswith(f, "temp_delete_")
+            rm(f; force=true)
+        end
+    end
+end
 
 
 
 
+
+@testset "get_all_embeddings tests" begin
+    close_db()
+
+    local TEST_DB = "temp_get_all_embeddings.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+                             description="test get_all_embeddings",
+                             keep_conn_open=false)
+    @test res_init === true
+
+    emb1 = Float32[0.1, 0.2, 0.3]
+    emb2 = Float32[1.0, 2.0, 3.0]
+    @test insert_embeddings(TEST_DB, "id1", emb1) === true
+    @test insert_embeddings(TEST_DB, "id2", emb2) === true
+
+    db = open_db(TEST_DB, keep_conn_open=true)
+    all_emb_conn = get_all_embeddings(db)
+    @test isa(all_emb_conn, Dict)
+    @test length(all_emb_conn) == 2
+    @test "id1" in keys(all_emb_conn)
+    @test "id2" in keys(all_emb_conn)
+    @test all_emb_conn["id1"] == emb1
+    @test all_emb_conn["id2"] == emb2
+
+    close_db(db)
+    all_emb_path = get_all_embeddings(TEST_DB)
+    @test isa(all_emb_path, Dict)
+    @test length(all_emb_path) == 2
+    @test "id1" in keys(all_emb_path)
+    @test "id2" in keys(all_emb_path)
+    @test all_emb_path["id1"] == emb1
+    @test all_emb_path["id2"] == emb2
+
+    db_err = open_db(TEST_DB, keep_conn_open=true)
+
+    SQLite.execute(db_err, "DROP TABLE $(WunDeeDB.META_DATA_TABLE_NAME)")
+    err_result = get_all_embeddings(TEST_DB)
+    @test isa(err_result, String)
+    @test occursin("no such table", err_result) || occursin("Meta table is empty", err_result)
+
+
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+@testset "get_all_ids tests" begin
+    close_db()
+    
+    local TEST_DB = "temp_get_all_ids.sqlite"
+    
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+                             description="test get_all_ids",
+                             keep_conn_open=false)
+    @test res_init === true
+
+    emb1 = Float32[0.1, 0.2, 0.3]
+    emb2 = Float32[1.0, 2.0, 3.0]
+    emb3 = Float32[4.0, 5.0, 6.0]
+
+    @test insert_embeddings(TEST_DB, "id1", emb1) === true
+    @test insert_embeddings(TEST_DB, "id2", emb2) === true
+    @test insert_embeddings(TEST_DB, "id3", emb3) === true
+
+    db = open_db(TEST_DB, keep_conn_open=true)
+    all_ids_conn = get_all_ids(db)
+    @test isa(all_ids_conn, Vector{String})
+    @test length(all_ids_conn) == 3
+    @test "id1" in all_ids_conn
+    @test "id2" in all_ids_conn
+    @test "id3" in all_ids_conn
+
+    close_db(db)  
+    all_ids_path = get_all_ids(TEST_DB)
+    @test isa(all_ids_path, Vector{String})
+    @test length(all_ids_path) == 3
+    @test "id1" in all_ids_path
+    @test "id2" in all_ids_path
+    @test "id3" in all_ids_path
+
+    db_err = open_db(TEST_DB, keep_conn_open=true)
+    SQLite.execute(db_err, "DROP TABLE $(WunDeeDB.MAIN_TABLE_NAME)")
+    err_result = get_all_ids(TEST_DB)
+    @test isa(err_result, String)
+    @test occursin("no such table", err_result)
+
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+
+
+@testset "linear_search_iteration tests" begin
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+
+    local TEST_DB = "temp_linear_search_iteration.sqlite"
+    
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+                             description="test linear search iteration",
+                             keep_conn_open=false)
+    @test res_init === true
+
+    @test insert_embeddings(TEST_DB, "a", Float32[0.0, 0.0, 0.0]) === true
+    @test insert_embeddings(TEST_DB, "b", Float32[1.0, 1.0, 1.0]) === true
+    @test insert_embeddings(TEST_DB, "c", Float32[2.0, 2.0, 2.0]) === true
+    @test insert_embeddings(TEST_DB, "d", Float32[-1.0, -1.0, -1.0]) === true
+    @test insert_embeddings(TEST_DB, "e", Float32[0.5, 0.5, 0.6]) === true
+
+    query = Float32[0.5, 0.5, 0.5]
+    metric = "euclidean"
+    top_k = 3
+
+    results = linear_search_iteration(TEST_DB, query, metric; top_k=top_k)
+    @test isa(results, Vector)
+    @test length(results) == top_k
+
+    distances = [r[1] for r in results]
+    ids = [r[2] for r in results]
+
+    @test isapprox(distances[1], 0.1; atol=1e-3)
+    @test distances[2] ≥ 0.1
+    @test distances[3] ≥ distances[2]  #ensure sorted order
+
+    @test "e" in ids
+
+    top_k_large = 10
+    results_large = linear_search_iteration(TEST_DB, query, metric; top_k=top_k_large)
+    @test isa(results_large, Vector)
+    @test length(results_large) == 5  #only 5 embeddings were inserted
+
+    db_err = open_db(TEST_DB, keep_conn_open=true)
+    SQLite.execute(db_err, "DROP TABLE $(WunDeeDB.MAIN_TABLE_NAME)")
+    err_result = linear_search_iteration(TEST_DB, query, metric; top_k=top_k)
+    @test isa(err_result, String)
+    @test occursin("no such table", err_result)
+
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+
+
+
+@testset "linear_search_ids tests" begin
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+
+    # Use a unique temporary database file.
+    local TEST_DB = "temp_linear_search_ids.sqlite"
+
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+                             description="test linear_search_ids",
+                             keep_conn_open=false)
+    @test res_init === true
+
+    @test insert_embeddings(TEST_DB, "a", Float32[0.0, 0.0, 0.0]) === true
+    @test insert_embeddings(TEST_DB, "b", Float32[1.0, 1.0, 1.0]) === true
+    @test insert_embeddings(TEST_DB, "c", Float32[2.0, 2.0, 2.0]) === true
+    @test insert_embeddings(TEST_DB, "d", Float32[-1.0, -1.0, -1.0]) === true
+    @test insert_embeddings(TEST_DB, "e", Float32[0.5, 0.5, 0.6]) === true
+
+    query = Float32[0.5, 0.5, 0.5]
+    metric = "euclidean"
+    top_k = 3
+
+    results = linear_search_ids(TEST_DB, query, metric; top_k=top_k)
+    @test isa(results, Vector)
+    @test length(results) == top_k
+
+    distances = [r[1] for r in results]
+    ids = [r[2] for r in results]
+
+    @test isapprox(distances[1], 0.1; atol=1e-3)
+    @test distances[1] ≤ distances[2] ≤ distances[3]
+    @test "e" in ids
+
+    top_k_large = 10
+    results_large = linear_search_ids(TEST_DB, query, metric; top_k=top_k_large)
+    @test isa(results_large, Vector)
+    @test length(results_large) == 5
+
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+
+
+@testset "linear_search_ids_batched tests" begin
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+
+    local TEST_DB = "temp_linear_search_ids_batched.sqlite"
+
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+                             description="test linear_search_ids_batched",
+                             keep_conn_open=false)
+    @test res_init === true
+
+    @test insert_embeddings(TEST_DB, "a", Float32[0.0, 0.0, 0.0]) === true
+    @test insert_embeddings(TEST_DB, "b", Float32[1.0, 1.0, 1.0]) === true
+    @test insert_embeddings(TEST_DB, "c", Float32[2.0, 2.0, 2.0]) === true
+    @test insert_embeddings(TEST_DB, "d", Float32[-1.0, -1.0, -1.0]) === true
+    @test insert_embeddings(TEST_DB, "e", Float32[0.5, 0.5, 0.6]) === true
+
+    query = Float32[0.5, 0.5, 0.5]
+    metric = "euclidean"
+    top_k = 3
+    batch_size = 1
+
+    results = linear_search_ids_batched(TEST_DB, query, metric; top_k=top_k, batch_size=batch_size)
+    @test isa(results, Vector)
+    @test length(results) == top_k
+
+    distances = [r[1] for r in results]
+    ids = [r[2] for r in results]
+
+    @test "e" in ids
+    @test isapprox(distances[1], 0.1; atol=1e-3)
+    @test distances[1] ≤ distances[2] ≤ distances[3]
+
+    top_k_large = 10
+    results_large = linear_search_ids_batched(TEST_DB, query, metric; top_k=top_k_large, batch_size=batch_size)
+    @test isa(results_large, Vector)
+    @test length(results_large) == 5
+
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+end
+
+
+
+
+
+
+
+@testset "linear_search_all_embeddings tests" begin
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+
+    local TEST_DB = "temp_linear_search_all_embeddings.sqlite"
+
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+                             description="test linear_search_all_embeddings",
+                             keep_conn_open=false)
+    @test res_init === true
+
+    @test insert_embeddings(TEST_DB, "a", Float32[0.0, 0.0, 0.0]) === true
+    @test insert_embeddings(TEST_DB, "b", Float32[1.0, 1.0, 1.0]) === true
+    @test insert_embeddings(TEST_DB, "c", Float32[2.0, 2.0, 2.0]) === true
+    @test insert_embeddings(TEST_DB, "d", Float32[-1.0, -1.0, -1.0]) === true
+    @test insert_embeddings(TEST_DB, "e", Float32[0.5, 0.5, 0.6]) === true
+
+    query = Float32[0.5, 0.5, 0.5]
+    metric = "euclidean"
+    top_k = 3
+
+    results = linear_search_all_embeddings(TEST_DB, query, metric; top_k=top_k)
+    @test isa(results, Vector)
+    @test length(results) == top_k
+
+    distances = [r[1] for r in results]
+    ids = [r[2] for r in results]
+
+    @test "e" in ids
+    @test isapprox(distances[1], 0.1; atol=1e-3)
+    @test distances[1] ≤ distances[2] ≤ distances[3]
+
+    top_k_large = 10
+    results_large = linear_search_all_embeddings(TEST_DB, query, metric; top_k=top_k_large)
+    @test isa(results_large, Vector)
+    @test length(results_large) == 5
+
+    db_err = open_db(TEST_DB, keep_conn_open=true)
+    SQLite.execute(db_err, "DROP TABLE $(WunDeeDB.META_DATA_TABLE_NAME)")
+    err_result = linear_search_all_embeddings(TEST_DB, query, metric; top_k=top_k)
+    @test isa(err_result, String)
+    @test occursin("no such table", err_result)
+
+    close_db()
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
+end
