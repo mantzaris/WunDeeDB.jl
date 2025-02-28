@@ -2,8 +2,10 @@ module WunDeeDB
 
 using SQLite
 using Tables, DBInterface
-using DataFrames
+using DataFrames, DataStructures
 
+include("linear/linear.jl")
+include("distance_metrics/distance_metrics.jl")
 
 export get_supported_data_types,
         initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
@@ -17,7 +19,9 @@ export get_supported_data_types,
         get_adjacent_id,
         count_entries
 
-        
+
+export supported_distance_metrics #from: distance_metrics/distance_metrics.jl
+
 
 ###################
 #TODO:
@@ -1044,6 +1048,76 @@ function get_embeddings(db_path::String, id_input)
     end
 end
 
+#TODO: xxx test and document
+function get_all_embeddings(db::SQLite.DB)
+    meta_rows = SQLite.transaction(db) do
+        DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame
+    end
+    if isempty(meta_rows)
+        error("Meta table is empty. The meta row should have been initialized during database setup.")
+    end
+    meta = meta_rows[1, :]
+    dt_string = meta.data_type
+    T = parse_data_type(dt_string)   #ex parse "Float32" into Float32
+
+    stmt = "SELECT id_text, embedding_blob FROM $MAIN_TABLE_NAME"
+    rows = SQLite.transaction(db) do
+        DBInterface.execute(db, stmt) |> DataFrame
+    end
+    
+    result = Dict{String, Any}()
+    for row in eachrow(rows)
+        id = row.id_text
+        blob = row.embedding_blob  # e.g. Vector{UInt8}
+        embedding_vec = blob_to_embedding(blob, T)
+        result[string(id)] = embedding_vec
+    end
+    
+    return result
+end
+
+#TODO: test xxx
+function get_all_embeddings(db_path::String)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+    
+    try
+        result = get_all_embeddings(db)
+        return result
+    catch e
+        close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
+        return "Error: $(e)"
+    end
+end
+
+
+#TODO: xxx test and docs
+function get_all_ids(db::SQLite.DB)
+    stmt = "SELECT id_text FROM $MAIN_TABLE_NAME"
+    
+    rows = SQLite.transaction(db) do
+        DBInterface.execute(db, stmt) |> DataFrame
+    end
+
+    return rows[:, :id_text]
+end
+
+#TODO: test xxx
+function get_all_ids(db_path::String)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+
+    try
+        result = get_all_ids(db)
+        return result
+    catch e
+        close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
+        return "Error: $(e)"
+    end
+end
+
 
 
 """
@@ -1241,6 +1315,25 @@ function get_adjacent_id(db_path::String, current_id; direction="next", full_row
 end
 
 
+#TODO: test XXX
+function get_minimum_id(db::SQLite.DB)
+    stmt = "SELECT id_text FROM $(MAIN_TABLE_NAME) ORDER BY id_text ASC LIMIT 1"
+    rows = DBInterface.execute(db, stmt) |> DataFrame
+    return isempty(rows) ? nothing : rows[1, :id_text]
+end
+
+function get_minimum_id(db_path::String)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+    try
+        result = get_minimum_id(db)
+        return result
+    catch e
+        close_db(db)
+        DB_HANDLE[] = nothing
+        KEEP_DB_OPEN[] = false
+        return "Error: $(e)"
+    end
+end
 
 
 """
