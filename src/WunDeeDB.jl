@@ -3,6 +3,7 @@ module WunDeeDB
 using SQLite
 using Tables, DBInterface
 using DataFrames, DataStructures
+using Distances
 
 include("linear/linear.jl")
 include("distance_metrics/distance_metrics.jl")
@@ -136,7 +137,7 @@ if result === true
 else
     println("Initialization failed: 'result'")
 end
-
+```
 """
 function initialize_db(db_path::String, embedding_length::Int, data_type::String; description::String="", keep_conn_open::Bool=true)
 
@@ -223,6 +224,7 @@ db = open_db("data/mydatabase.sqlite", keep_conn_open="true")
 SQLite.execute(db, "SELECT * FROM my_table;")
 # Don't forget to close the database when done.
 close_db(db)
+```
 """
 function open_db(db_path::String; keep_conn_open::Bool=true)
 
@@ -285,6 +287,7 @@ close_db(db)
 
 or 
 close_db()
+```
 """ 
 function close_db(db::SQLite.DB)
     SQLite.close(db)
@@ -320,7 +323,7 @@ if result === true
 else
     println("Error: 'result'")
 end
-
+```
 """
 function delete_db(db_path::String)
 
@@ -361,7 +364,7 @@ if result === true
 else
     println("Error: 'result'")
 end
-
+```
 """
 function delete_all_embeddings(db_path::String)
     db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
@@ -420,7 +423,7 @@ if result isa NamedTuple
 else
     println("Error: ", result)
 end
-
+```
 """
 function get_meta_data(db::SQLite.DB)
     stmt = "SELECT * FROM $META_DATA_TABLE_NAME"
@@ -529,11 +532,11 @@ Infer the data type of the elements in a numeric embedding vector.
 ```julia
 vec = [1.0, 2.0, 3.0]
 println(infer_data_type(vec))  # "Float64"
+```
 """
 function infer_data_type(embedding::AbstractVector{<:Number})
     return string(eltype(embedding))
 end
-
 
 # function embedding_to_blob(embedding::AbstractVector{<:Number})
 #     return Vector{UInt8}(reinterpret(UInt8, embedding))
@@ -606,6 +609,7 @@ if result === true
 else
     println("Error: ", result)
 end
+```
 """
 function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
     #if a single ID or embedding is passed, wrap it in a one-element array
@@ -719,7 +723,7 @@ if result === true
 else
     println("Error: ", result)
 end
-
+```
 """
 function delete_embeddings(db::SQLite.DB, id_input)
     #a single ID is passed, wrap it in a one-element array
@@ -803,7 +807,7 @@ if result === true
 else
     println("Error: ", result)
 end
-
+```
 """
 function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
     #wrap a single ID or embedding into a one-element array
@@ -985,7 +989,7 @@ embeddings = get_embeddings("my_database.db", [1, 2, 3])
 for (id, emb) in embeddings
     println("ID: 'id', Embedding: ", emb)
 end
-
+```
 """
 function get_embeddings(db::SQLite.DB, id_input)
     #wrap a single ID into an array
@@ -1161,7 +1165,7 @@ embeddings = random_embeddings("my_database.db", 5)
 for (id, emb) in embeddings
     println("ID: 'id', Embedding: ", emb)
 end
-
+```
 """ 
 function random_embeddings(db::SQLite.DB, num::Int)
     if num < 0
@@ -1260,7 +1264,7 @@ if result isa NamedTuple
 else
     println("Error or record not found: ", result)
 end
-
+```
 """
 function get_adjacent_id(db::SQLite.DB, current_id; direction="next", full_row=true)
     
@@ -1383,7 +1387,7 @@ println("Number of entries: ", entry_count)
 # Using a database file path:
 entry_count = count_entries("my_database.db", update_meta=true)
 println("Number of entries: ", entry_count)
-
+```
 """
 function count_entries(db::SQLite.DB; update_meta::Bool=false)
     stmt = "SELECT COUNT(*) AS count FROM $MAIN_TABLE_NAME"

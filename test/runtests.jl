@@ -1099,10 +1099,6 @@ end
 
 
 
-
-
-
-
 @testset "linear_search_all_embeddings tests" begin
     close_db()
     for f in readdir(".")
@@ -1157,3 +1153,6 @@ end
         end
     end
 end
+
+
+
