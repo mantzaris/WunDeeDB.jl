@@ -90,9 +90,12 @@ const CREATE_META_TABLE_STMT = """
        )
        """
 
-#optional ANN table schemas 
+#optional ANN table schemas
+const HNSW_INDEX_TABLE_NAME = "HNSWIndex"
+const HNSW_CONFIG_TABLE_NAME = "HNSWConfig"
+
 const CREATE_DISK_HNSW_TABLE_STMT = """
-        CREATE TABLE IF NOT EXISTS HNSWIndex (
+        CREATE TABLE IF NOT EXISTS $HNSW_INDEX_TABLE_NAME (
             node_id TEXT NOT NULL,
             layer INTEGER NOT NULL,
             neighbors TEXT NOT NULL,
@@ -100,6 +103,19 @@ const CREATE_DISK_HNSW_TABLE_STMT = """
         )
         """
 
+const CREATE_HNSW_CONFIG_TABLE_STMT = """
+        CREATE TABLE IF NOT EXISTS $HNSW_CONFIG_TABLE_NAME (
+            M INTEGER,
+            efConstruction INTEGER,
+            efSearch INTEGER,
+            entry_point TEXT,
+            max_level INTEGER
+        )
+        """
+const META_HNSW_INSERT_CONFIG_STMT = """
+        INSERT INTO $(HNSW_CONFIG_TABLE_NAME) (M, efConstruction, efSearch, entry_point, max_level)
+        VALUES (?, ?, ?, ?, ?)
+        """
 
 const DELETE_EMBEDDINGS_STMT = "DELETE FROM $(MAIN_TABLE_NAME)"
 
@@ -176,18 +192,25 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
             SQLite.execute(db, CREATE_MAIN_TABLE_STMT)
             SQLite.execute(db, CREATE_META_TABLE_STMT)
 
-            if length(ann) > 0
-                if ann == "hnsw"
-                    SQLite.execute(db, CREATE_DISK_HNSW_TABLE_STMT)
-                end
-            end
-
             df = DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
 
             if isempty(df) #if empty, insert initial meta information
                 #in initial stage set embedding_count to 0 because no embeddings have been added yet
                 SQLite.execute(db, META_TABLE_FULL_ROW_INSERTION_STMT, (0, embedding_length, data_type, endianness, description,ann))
             end
+
+            if length(ann) > 0
+                if ann == "hnsw"
+                    SQLite.execute(db, CREATE_DISK_HNSW_TABLE_STMT)
+                    SQLite.execute(CREATE_HNSW_CONFIG_TABLE_STMT)
+                end
+
+                df = DBInterface.execute(db, "SELECT * FROM $(HNSW_CONFIG_TABLE_NAME)") |> DataFrame
+                if isempty(df)
+                    SQLite.execute(db, META_HNSW_INSERT_CONFIG_STMT, (30, 300, 100, "", 0))
+                end
+            end
+
         end
 
         if KEEP_DB_OPEN[]
