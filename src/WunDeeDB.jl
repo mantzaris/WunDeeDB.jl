@@ -85,15 +85,27 @@ const CREATE_META_TABLE_STMT = """
 	   embedding_length INT,
 	   data_type TEXT NOT NULL,
        endianness TEXT NOT NULL,
-       description TEXT
+       description TEXT,
+       ann TEXT
        )
        """
+
+#optional ANN table schemas 
+const CREATE_DISK_HNSW_TABLE_STMT = """
+        CREATE TABLE IF NOT EXISTS HNSWIndex (
+            node_id TEXT NOT NULL,
+            layer INTEGER NOT NULL,
+            neighbors TEXT NOT NULL,
+            PRIMARY KEY (node_id, layer)
+        )
+        """
+
 
 const DELETE_EMBEDDINGS_STMT = "DELETE FROM $(MAIN_TABLE_NAME)"
 
 const META_TABLE_FULL_ROW_INSERTION_STMT = """
-        INSERT INTO $(META_DATA_TABLE_NAME) (embedding_count, embedding_length, data_type, endianness, description)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO $(META_DATA_TABLE_NAME) (embedding_count, embedding_length, data_type, endianness, description, ann)
+        VALUES (?, ?, ?, ?, ?, ?)
         """
 
 const META_SELECT_ALL_QUERY = "SELECT * FROM $(META_DATA_TABLE_NAME)"
@@ -102,6 +114,7 @@ const META_UPDATE_DESCRIPTION = "UPDATE $(META_DATA_TABLE_NAME) SET description 
 const META_RESET_STMT = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = 0"
 
 const INSERT_EMBEDDING_STMT = "INSERT INTO $MAIN_TABLE_NAME (id_text, embedding_blob) VALUES (?, ?)"
+
 
 
 
@@ -133,7 +146,7 @@ else
 end
 ```
 """
-function initialize_db(db_path::String, embedding_length::Int, data_type::String; description::String="", keep_conn_open::Bool=true)
+function initialize_db(db_path::String, embedding_length::Int, data_type::String; description::String="", keep_conn_open::Bool=true, ann="")
 
     keep_conn_open ? KEEP_DB_OPEN[] = true : KEEP_DB_OPEN[] = false
 
@@ -163,15 +176,21 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
             SQLite.execute(db, CREATE_MAIN_TABLE_STMT)
             SQLite.execute(db, CREATE_META_TABLE_STMT)
 
-            rows = collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+            if length(ann) > 0
+                if ann == "hnsw"
+                    SQLite.execute(db, CREATE_DISK_HNSW_TABLE_STMT)
+                end
+            end
 
-            if isempty(rows) #if empty, insert initial meta information
+            df = DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+
+            if isempty(df) #if empty, insert initial meta information
                 #in initial stage set embedding_count to 0 because no embeddings have been added yet
-                SQLite.execute(db, META_TABLE_FULL_ROW_INSERTION_STMT, (0, embedding_length, data_type, endianness, description))
+                SQLite.execute(db, META_TABLE_FULL_ROW_INSERTION_STMT, (0, embedding_length, data_type, endianness, description,ann))
             end
         end
 
-        if KEEP_DB_OPEN[] 
+        if KEEP_DB_OPEN[]
             DB_HANDLE[] = db
         else
             close_db(db)
