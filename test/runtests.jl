@@ -6,7 +6,7 @@ using DBInterface, Tables
 using DataStructures 
 
 
-
+include("diskhnsw_tests.jl")
 
 
 @testset "Supported Data Types" begin

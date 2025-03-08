@@ -10,6 +10,9 @@ include("utilities/utilities.jl")
 include("linear/linear.jl")
 include("distance_metrics/distance_metrics.jl")
 
+include("diskhnsw/DiskHNSW.jl")
+using .DiskHNSW
+
 export get_supported_data_types,
         initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
         get_meta_data, update_description,
@@ -90,6 +93,22 @@ const CREATE_META_TABLE_STMT = """
        )
        """
 
+const DELETE_EMBEDDINGS_STMT = "DELETE FROM $(MAIN_TABLE_NAME)"
+
+const META_TABLE_FULL_ROW_INSERTION_STMT = """
+        INSERT INTO $(META_DATA_TABLE_NAME) (embedding_count, embedding_length, data_type, endianness, description, ann)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """
+
+const META_SELECT_ALL_QUERY = "SELECT * FROM $(META_DATA_TABLE_NAME)"
+const META_UPDATE_QUERY = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = ?"
+const META_UPDATE_DESCRIPTION = "UPDATE $(META_DATA_TABLE_NAME) SET description = ?"
+const META_RESET_STMT = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = 0"
+
+const INSERT_EMBEDDING_STMT = "INSERT INTO $MAIN_TABLE_NAME (id_text, embedding_blob) VALUES (?, ?)"
+
+
+
 #optional ANN table schemas
 const HNSW_INDEX_TABLE_NAME = "HNSWIndex"
 const HNSW_CONFIG_TABLE_NAME = "HNSWConfig"
@@ -116,21 +135,6 @@ const META_HNSW_INSERT_CONFIG_STMT = """
         INSERT INTO $(HNSW_CONFIG_TABLE_NAME) (M, efConstruction, efSearch, entry_point, max_level)
         VALUES (?, ?, ?, ?, ?)
         """
-
-const DELETE_EMBEDDINGS_STMT = "DELETE FROM $(MAIN_TABLE_NAME)"
-
-const META_TABLE_FULL_ROW_INSERTION_STMT = """
-        INSERT INTO $(META_DATA_TABLE_NAME) (embedding_count, embedding_length, data_type, endianness, description, ann)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """
-
-const META_SELECT_ALL_QUERY = "SELECT * FROM $(META_DATA_TABLE_NAME)"
-const META_UPDATE_QUERY = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = ?"
-const META_UPDATE_DESCRIPTION = "UPDATE $(META_DATA_TABLE_NAME) SET description = ?"
-const META_RESET_STMT = "UPDATE $(META_DATA_TABLE_NAME) SET embedding_count = 0"
-
-const INSERT_EMBEDDING_STMT = "INSERT INTO $MAIN_TABLE_NAME (id_text, embedding_blob) VALUES (?, ?)"
-
 
 
 
@@ -203,12 +207,13 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
                 if ann == "hnsw"
                     SQLite.execute(db, CREATE_DISK_HNSW_TABLE_STMT)
                     SQLite.execute(CREATE_HNSW_CONFIG_TABLE_STMT)
-                end
+                    df = DBInterface.execute(db, "SELECT * FROM $(HNSW_CONFIG_TABLE_NAME)") |> DataFrame
 
-                df = DBInterface.execute(db, "SELECT * FROM $(HNSW_CONFIG_TABLE_NAME)") |> DataFrame
-                if isempty(df)
-                    SQLite.execute(db, META_HNSW_INSERT_CONFIG_STMT, (30, 300, 100, "", 0))
+                    if isempty(df)
+                        SQLite.execute(db, META_HNSW_INSERT_CONFIG_STMT, (30, 300, 100, "", 0))
+                    end
                 end
+                
             end
 
         end

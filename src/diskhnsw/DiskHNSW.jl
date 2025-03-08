@@ -1,4 +1,4 @@
-
+module DiskHNSW
 
 
 using SQLite
@@ -6,6 +6,7 @@ using DBInterface
 using DataFrames
 using JSON
 using DataStructures: PriorityQueue
+
 
 
 
@@ -46,10 +47,7 @@ function save_neighbors(db::SQLite.DB, node_id::String, adjacency::Dict{Int,Vect
     end
 end
 
-#TODO: replace with library call
-function euclidean_distance(v1::Vector{Float64}, v2::Vector{Float64})
-    return sqrt(sum((v1 .- v2) .^ 2))
-end
+
 
 function assign_level(M::Int)::Int
     # random ~ geometric-like distribution
@@ -65,7 +63,7 @@ function greedy_search_at_level(
     #embed of the start node
     embed_map = get_embeddings(db, [start_id])
     current_vec = embed_map[start_id]
-    current_dist = euclidean_distance(query_vec, current_vec)
+    current_dist = WunDeeDB.compute_distance(query_vec, current_vec, "euclidean") #euclidean_distance(query_vec, current_vec)
     current_node_id = start_id
 
     #adjacency for the current node
@@ -82,7 +80,7 @@ function greedy_search_at_level(
         nbr_embed_map = get_embeddings(db, nbrs)
 
         for nbr in nbrs
-            d = euclidean_distance(query_vec, nbr_embed_map[nbr])
+            d = WunDeeDB.compute_distance(query_vec, nbr_embed_map[nbr], "euclidean") #euclidean_distance(query_vec, nbr_embed_map[nbr])
             if d < current_dist
                 current_dist = d
                 current_node_id = nbr
@@ -134,7 +132,7 @@ function search_layer_with_ef(
     #start embedding
     embed_map = get_embeddings(db, [start_id])
     start_vec = embed_map[start_id]
-    start_dist = euclidean_distance(query_vec, start_vec)
+    start_dist = WunDeeDB.compute_distance(query_vec, start_vec, "euclidean") #euclidean_distance(query_vec, start_vec)
     candidate_queue[start_id] = start_dist
     push!(visited, start_id)
 
@@ -166,7 +164,7 @@ function search_layer_with_ef(
             end
             push!(visited, nbr)
 
-            d_nbr = euclidean_distance(query_vec, nbr_embed_map[nbr])
+            d_nbr = WunDeeDB.compute_distance(query_vec, nbr_embed_map[nbr], "euclidean") #euclidean_distance(query_vec, nbr_embed_map[nbr])
 
             if length(top_candidates) < ef
                 top_candidates[nbr] = d_nbr
@@ -197,7 +195,8 @@ function prune_neighbors(
         return String[]
     end
     embed_map = get_embeddings(db, candidate_ids)
-    dists = [(cid, euclidean_distance(new_vec, embed_map[cid])) for cid in candidate_ids]
+    #dists = [(cid, euclidean_distance(new_vec, embed_map[cid])) for cid in candidate_ids]
+    dists = [(cid, WunDeeDB.compute_distance(new_vec, embed_map[cid], "euclidean")) for cid in candidate_ids]
     sorted_cands = sort(dists, by=x->x[2])
     pruned = first(sorted_cands, min(M, length(sorted_cands)))
     return [pc[1] for pc in pruned]
@@ -219,7 +218,9 @@ function prune_neighbor_list!(
     embed_map = get_embeddings(db, [node_id; current_neighbors])
     node_vec = embed_map[node_id]
 
-    dist_list = [(nbr, euclidean_distance(node_vec, embed_map[nbr])) for nbr in current_neighbors]
+    # dist_list = [(nbr, euclidean_distance(node_vec, embed_map[nbr])) for nbr in current_neighbors]
+    dist_list = [(nbr, WunDeeDB.compute_distance(node_vec, embed_map[nbr], "euclidean")) for nbr in current_neighbors]
+
     sorted_nbrs = sort(dist_list, by=x->x[2])
     keep = first(sorted_nbrs, M)
     keep_ids = [kn[1] for kn in keep]
@@ -339,7 +340,10 @@ function search(
     end
 
     embed_map = get_embeddings(db, candidates)
-    dist_pairs = [(c, euclidean_distance(query_vec, embed_map[c])) for c in candidates]
+    
+    # dist_pairs = [(c, euclidean_distance(query_vec, embed_map[c])) for c in candidates]
+    dist_pairs = [(nbr, WunDeeDB.compute_distance(node_vec, embed_map[nbr], "euclidean")) for nbr in current_neighbors]
+
     dist_sorted = sort(dist_pairs, by=x->x[2])
     best_k = first(dist_sorted, min(k, length(dist_sorted)))
     return [p[1] for p in best_k]
@@ -394,3 +398,4 @@ end
 
 
 
+end # module DiskHNSW
