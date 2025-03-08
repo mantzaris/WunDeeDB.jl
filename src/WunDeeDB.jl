@@ -407,7 +407,17 @@ else
 end
 ```
 """
-#TODO: xxx
+function delete_all_embeddings_ann(db)
+    ann_type = get_ann_type(db)
+    if ann_type == "hnsw"
+        stmt = "DELETE FROM $HNSW_INDEX_TABLE_NAME"
+        SQLite.execute(db, stmt)
+        
+        SQLite.execute(db, "DELETE FROM $HNSW_CONFIG_TABLE_NAME")
+        SQLite.execute(db, META_HNSW_INSERT_CONFIG_STMT, (30, 300, 100, "", 0))
+    end
+end
+
 function delete_all_embeddings(db_path::String)
     db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
     
@@ -415,6 +425,8 @@ function delete_all_embeddings(db_path::String)
         SQLite.transaction(db) do
             SQLite.execute(db, DELETE_EMBEDDINGS_STMT) #clear all embeddings
             SQLite.execute(db, META_RESET_STMT) #reset the embedding count to 0
+
+            delete_all_embeddings_ann(db)
         end
 
         return true
@@ -731,7 +743,6 @@ else
 end
 ```
 """
-#TODO: XXX
 function delete_embeddings_ann(db::SQLite.DB, ids)
     function ann_handle_delete!(db::SQLite.DB, node_id::String, ann_type::String)
         if ann_type == "hnsw"
