@@ -46,7 +46,7 @@ function save_neighbors(db::SQLite.DB, node_id::String, adjacency::Dict{Int,Vect
     end
 end
 
-
+#TODO: replace with library call
 function euclidean_distance(v1::Vector{Float64}, v2::Vector{Float64})
     return sqrt(sum((v1 .- v2) .^ 2))
 end
@@ -94,6 +94,33 @@ function greedy_search_at_level(
     return current_node_id
 end
 
+# function find_worst(tc_list::Vector{Pair{String, Float64}})::Pair{String, Float64}
+#     worst_pair = first(tc_list)
+#     for p in tc_list
+#         if p.second > worst_pair.second
+#             worst_pair = p
+#         end
+#     end
+#     return worst_pair
+# end
+
+function find_worst_id_dist(pq::PriorityQueue{String, Float64})
+    #convert the priority queue to a vector of Pair{String, Float64}
+    tc_list = collect(pq)
+    
+    #assume it's not empty
+    worst_pair = first(tc_list)
+    for p in tc_list
+        if p[2] > worst_pair[2]
+            worst_pair = p
+        end
+    end
+    
+    return worst_pair.first, worst_pair.second
+end
+
+
+
 function search_layer_with_ef(
     db::SQLite.DB,
     query_vec::Vector{Float64},
@@ -118,13 +145,13 @@ function search_layer_with_ef(
         current_id, current_dist = peek(candidate_queue)
 
         if length(top_candidates) == ef
-            worst_id, worst_dist = findmax(top_candidates, by=x->x[2])
+            worst_id, worst_dist = find_worst_id_dist(top_candidates)
             if current_dist >= worst_dist
                 break
             end
         end
 
-        pop!(candidate_queue)
+        pop!(candidate_queue) #or dequeue!
 
         neighbors_dict = get_neighbors(db, current_id)
         if !haskey(neighbors_dict, level)
@@ -145,7 +172,8 @@ function search_layer_with_ef(
                 top_candidates[nbr] = d_nbr
                 candidate_queue[nbr] = d_nbr
             else
-                worst_id, worst_dist = findmax(top_candidates, by=x->x[2])
+
+                worst_id, worst_dist = find_worst_id_dist(top_candidates)
                 if d_nbr < worst_dist
                     delete!(top_candidates, worst_id)
                     top_candidates[nbr] = d_nbr
@@ -317,6 +345,7 @@ function search(
     return [p[1] for p in best_k]
 end
 
+#TODO: re-merging the adjacency of the deleted node or reestablishing a new entry point that definitely has the highest layer
 function delete!(
     db::SQLite.DB,
     node_id::String;
@@ -343,7 +372,7 @@ function delete!(
     local ml = max_level
 
     if node_id == ep
-        #pick a new entry if any remain
+        #pick a new entry if any remain, “pick the first row” approach but pick the node with the highest layer in the database to be consistent  with HNSW with top level entry
         df = DBInterface.execute(db,
             "SELECT node_id FROM $HNSW_INDEX_TABLE_NAME LIMIT 1") |> DataFrame
         if nrow(df) == 0
@@ -360,12 +389,6 @@ function delete!(
 
     return (ep, ml)
 end
-
-
-
-
-
-
 
 
 
