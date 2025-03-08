@@ -173,7 +173,6 @@ end
     embedding = rand(Float32, 128)
     id = "embedding1"
     res_insert = insert_embeddings(TEST_DB, id, embedding)
-    println(res_insert)
     @test res_insert === true
 
 

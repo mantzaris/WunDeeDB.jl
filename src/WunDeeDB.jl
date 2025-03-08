@@ -629,6 +629,45 @@ else
 end
 ```
 """
+function insert_embedding_hnsw!(db::SQLite.DB, node_id::String)
+    df = DBInterface.execute(db, """
+        SELECT M, efConstruction, efSearch, entry_point, max_level
+        FROM $HNSW_CONFIG_TABLE_NAME
+        LIMIT 1
+        """) |> DataFrame
+
+    if nrow(df) == 0
+        error("HNSW is enabled but the config table is empty.")
+    end
+
+    M = df[1, :M]
+    efConstruction = df[1, :efConstruction]
+    efSearch = df[1, :efSearch]
+    ep = df[1, :entry_point]
+    ml = df[1, :max_level]
+
+    new_ep, new_ml = DiskHNSW.insert!(db, node_id; M=M, efConstruction=efConstruction,
+                                      efSearch=efSearch, entry_point=ep, max_level=ml)
+
+    if new_ep != ep || new_ml != ml
+        DBInterface.execute(db, """
+            UPDATE $HNSW_CONFIG_TABLE_NAME
+            SET entry_point = ?, max_level = ?
+        """, (new_ep, new_ml))
+    end
+end
+
+function insert_embeddings_ann(db::SQLite.DB, ids)
+    ann_type = get_ann_type(db)
+    if ann_type == "hnsw"
+        SQLite.transaction(db) do
+            for node_id in ids
+                insert_embedding_hnsw!(db, string(node_id))
+            end
+        end
+    end
+end
+
 function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
     #if a single ID or embedding is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
@@ -683,6 +722,8 @@ function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
         #update the meta table by incrementing embedding_count by n
         update_meta(db, n)
     end
+
+    insert_embeddings_ann(db, ids)
 
     return true
 end
