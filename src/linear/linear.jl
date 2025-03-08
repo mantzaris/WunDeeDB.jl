@@ -13,11 +13,13 @@ function linear_search_iteration(db_path::String, query_embedding::AbstractVecto
 
     current_id = get_minimum_id(db_path)
     while current_id !== nothing
-        emb = get_embeddings(db_path, current_id)
+        emb_dict = get_embeddings(db_path, current_id)
 
-        if !(emb isa AbstractVector)
-            return emb
+        if haskey(emb_dict,current_id) == false
+            return nothing
         end
+        
+        emb = emb_dict[current_id]
 
         dist = compute_distance(query_embedding, emb, metric)
         if length(pq) < top_k
@@ -26,6 +28,7 @@ function linear_search_iteration(db_path::String, query_embedding::AbstractVecto
             pop!(pq)
             push!(pq, (dist, current_id))
         end
+
         current_id = get_adjacent_id(db_path, current_id, direction="next", full_row=false)
     end
 
@@ -55,8 +58,11 @@ function linear_search_ids(db_path::String, query_embedding::AbstractVector, met
     pq = BinaryMaxHeap{Tuple{Float64,String}}()
     
     for current_id in all_ids
-        emb = get_embeddings(db_path, current_id)
-        if emb !== nothing
+        emb_dict = get_embeddings(db_path, current_id)
+
+        
+        if haskey(emb_dict,current_id) == true
+            emb = emb_dict[current_id]
             dist = compute_distance(query_embedding, emb, metric)
 
             if length(pq) < top_k

@@ -7,9 +7,6 @@ using DataFrames
 using JSON
 using DataStructures: PriorityQueue
 
-# We'll store adjacency in a table "HNSWIndex" with columns:
-#   node_id TEXT, layer INTEGER, neighbors TEXT (JSON array of neighbor IDs)
-const HNSW_INDEX_TABLE_NAME = "HNSWIndex"
 
 
 function get_neighbors(db::SQLite.DB, node_id::String)::Dict{Int,Vector{String}}
@@ -20,9 +17,9 @@ function get_neighbors(db::SQLite.DB, node_id::String)::Dict{Int,Vector{String}}
          WHERE node_id = ? 
          ORDER BY layer DESC",
         (node_id,)) |> DataFrame
-
     
     neighbors_dict = Dict{Int,Vector{String}}()
+
     for row in eachrow(df)
         layer::Int = row.layer
         neighbors_json::String = row.neighbors

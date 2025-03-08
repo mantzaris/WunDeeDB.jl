@@ -957,12 +957,12 @@ function get_embeddings(db::SQLite.DB, id_input)
     
     #get rows from the main table
     rows = SQLite.transaction(db) do
-        DBInterface.execute(db, stmt, params) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, stmt, params)))
+        DBInterface.execute(db, stmt, params) |> DataFrame 
     end
     
     #get meta table information to determine the stored data type
     meta_rows = SQLite.transaction(db) do
-        DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame #collect(Tables.namedtupleiterator(DBInterface.execute(db, META_SELECT_ALL_QUERY)))
+        DBInterface.execute(db, META_SELECT_ALL_QUERY) |> DataFrame 
     end
 
     if isempty(meta_rows)
@@ -981,12 +981,7 @@ function get_embeddings(db::SQLite.DB, id_input)
         result[string(id)] = embedding_vec
     end
 
-    #only one ID was requested, return its embedding directly (or nothing if not found)
-    if n == 1
-        return isempty(result) ? nothing : first(values(result))
-    else
-        return result
-    end
+    return result
 end
 
 function get_embeddings(db_path::String, id_input)
