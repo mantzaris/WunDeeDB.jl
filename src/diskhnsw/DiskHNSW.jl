@@ -14,7 +14,7 @@ function get_neighbors(db::SQLite.DB, node_id::String)::Dict{Int,Vector{String}}
     
     df = DBInterface.execute(db, 
         "SELECT layer, neighbors 
-         FROM $HNSW_INDEX_TABLE_NAME 
+         FROM $(WunDeeDB.HNSW_INDEX_TABLE_NAME)
          WHERE node_id = ? 
          ORDER BY layer DESC",
         (node_id,)) |> DataFrame
@@ -34,14 +34,14 @@ end
 function save_neighbors(db::SQLite.DB, node_id::String, adjacency::Dict{Int,Vector{String}})
     #remove old adjacency
     DBInterface.execute(db,
-        "DELETE FROM $HNSW_INDEX_TABLE_NAME WHERE node_id = ?",
+        "DELETE FROM $(WunDeeDB.HNSW_INDEX_TABLE_NAME) WHERE node_id = ?",
         (node_id,))
 
     #insert row by row
     for (layer, nbrs) in adjacency
         neighbors_text = JSON.json(nbrs)
         DBInterface.execute(db, """
-            INSERT INTO $HNSW_INDEX_TABLE_NAME(node_id, layer, neighbors)
+            INSERT INTO $(WunDeeDB.HNSW_INDEX_TABLE_NAME) (node_id, layer, neighbors)
             VALUES (?, ?, ?)
         """, (node_id, layer, neighbors_text))
     end
@@ -369,7 +369,7 @@ function delete!(
     end
 
     DBInterface.execute(db,
-        "DELETE FROM $HNSW_INDEX_TABLE_NAME WHERE node_id = ?",
+        "DELETE FROM $(WunDeeDB.HNSW_INDEX_TABLE_NAME) WHERE node_id = ?",
         (node_id,))
 
     local ep = entry_point
@@ -378,7 +378,7 @@ function delete!(
     if node_id == ep
         #pick a new entry if any remain, “pick the first row” approach but pick the node with the highest layer in the database to be consistent  with HNSW with top level entry
         df = DBInterface.execute(db,
-            "SELECT node_id FROM $HNSW_INDEX_TABLE_NAME LIMIT 1") |> DataFrame
+            "SELECT node_id FROM $(WunDeeDB.HNSW_INDEX_TABLE_NAME) LIMIT 1") |> DataFrame
         if nrow(df) == 0
             ep = ""
             ml = 0

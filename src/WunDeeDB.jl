@@ -2,7 +2,7 @@ module WunDeeDB
 
 using SQLite
 using Tables, DBInterface
-using DataFrames, DataStructures
+using DataFrames, DataStructures, JSON
 using Distances
 
 
@@ -407,6 +407,7 @@ else
 end
 ```
 """
+#TODO: xxx
 function delete_all_embeddings(db_path::String)
     db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
     
@@ -557,7 +558,21 @@ end
 
 
 
+function get_ann_type(db::SQLite.DB)
+    stmt = "SELECT ann FROM $META_DATA_TABLE_NAME"
+    df = DBInterface.execute(db, stmt) |> DataFrame
+    if nrow(df) == 0
+        return ""
+    end
 
+    ann_val = df[1, :ann]
+    
+    if ann_val == "hnsw"
+        return "hnsw"
+    else
+        return ""
+    end
+end
 
 
 
@@ -716,6 +731,36 @@ else
 end
 ```
 """
+#TODO: XXX
+function delete_embeddings_ann(db::SQLite.DB, ids)
+    function ann_handle_delete!(db::SQLite.DB, node_id::String, ann_type::String)
+        if ann_type == "hnsw"
+            stmt = "SELECT entry_point, max_level FROM $HNSW_CONFIG_TABLE_NAME LIMIT 1"
+            df = DBInterface.execute(db, stmt) |> DataFrame
+            if nrow(df) == 0
+                return
+            end
+
+            ep_db   = df[1, :entry_point]
+            level_db = df[1, :max_level]
+
+            new_ep, new_ml = DiskHNSW.delete!(db, node_id, ep_db, level_db)
+            stmt = """
+                UPDATE $HNSW_CONFIG_TABLE_NAME
+                SET entry_point = ?, max_level = ?
+                """
+            DBInterface.execute(db, stmt, (new_ep, new_ml))
+        end
+    end
+
+    ann_type = get_ann_type(db)
+    if !isempty(ann_type)
+        for node_id in ids
+            ann_handle_delete!(db, node_id, ann_type)
+        end
+    end
+end
+
 function delete_embeddings(db::SQLite.DB, id_input)
     #a single ID is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? map(string, id_input) : [string(id_input)]
@@ -734,6 +779,8 @@ function delete_embeddings(db::SQLite.DB, id_input)
         #update the meta table for bulk deletion: subtract 'n' from the meta embedding_count
         update_meta(db, -n)
     end
+
+    delete_embeddings_ann(db::SQLite.DB, ids)
 
     return true
 end
