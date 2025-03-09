@@ -29,6 +29,7 @@ export get_supported_data_types,
 
 export supported_distance_metrics #from: distance_metrics/distance_metrics.jl
 export linear_search_iteration, linear_search_ids, linear_search_ids_batched, linear_search_all_embeddings #from: linear/linear.jl
+export search_ann
 
 ###################
 #TODO:
@@ -965,7 +966,7 @@ function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
         end
     end
 
-    updatet_embeddings_ann(db, ids)
+    update_embeddings_ann(db, ids)
 
     return true
 end
@@ -1483,7 +1484,31 @@ end
 
 
 
+function search_ann(db_path::String, query_embedding::AbstractVector, metric::String; top_k::Int=5)
+    db = !isnothing(DB_HANDLE[]) ? DB_HANDLE[] : open_db(db_path)
+    ann_type = get_ann_type(db)
 
+    results = String[]
+
+    if ann_type == "hnsw"
+        config_df = DBInterface.execute(db, """
+                SELECT efSearch, entry_point, max_level
+                FROM $HNSW_CONFIG_TABLE_NAME LIMIT 1
+                """) |> DataFrame
+        
+        if nrow(config_df) == 0
+            return String[]
+        end
+
+        efS = config_df[1, :efSearch]
+        ep = config_df[1, :entry_point]
+        ml = config_df[1, :max_level]
+
+        results = search(db, query_embedding, top_k; efSearch=efS, entry_point=ep, max_level=ml)
+    end
+
+    return results
+end
 
 
 
