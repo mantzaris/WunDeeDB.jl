@@ -629,45 +629,6 @@ else
 end
 ```
 """
-function insert_embedding_hnsw!(db::SQLite.DB, node_id::String)
-    df = DBInterface.execute(db, """
-        SELECT M, efConstruction, efSearch, entry_point, max_level
-        FROM $HNSW_CONFIG_TABLE_NAME
-        LIMIT 1
-        """) |> DataFrame
-
-    if nrow(df) == 0
-        error("HNSW is enabled but the config table is empty.")
-    end
-
-    M = df[1, :M]
-    efConstruction = df[1, :efConstruction]
-    efSearch = df[1, :efSearch]
-    ep = df[1, :entry_point]
-    ml = df[1, :max_level]
-
-    new_ep, new_ml = DiskHNSW.insert!(db, node_id; M=M, efConstruction=efConstruction,
-                                      efSearch=efSearch, entry_point=ep, max_level=ml)
-
-    if new_ep != ep || new_ml != ml
-        DBInterface.execute(db, """
-            UPDATE $HNSW_CONFIG_TABLE_NAME
-            SET entry_point = ?, max_level = ?
-        """, (new_ep, new_ml))
-    end
-end
-
-function insert_embeddings_ann(db::SQLite.DB, ids)
-    ann_type = get_ann_type(db)
-    if ann_type == "hnsw"
-        SQLite.transaction(db) do
-            for node_id in ids
-                insert_embedding_hnsw!(db, string(node_id))
-            end
-        end
-    end
-end
-
 function insert_embeddings(db::SQLite.DB, id_input, embedding_input)
     #if a single ID or embedding is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? id_input : [id_input]
@@ -743,6 +704,46 @@ function insert_embeddings(db_path::String, id_input, embedding_input)
 end
 
 
+function insert_embeddings_ann(db::SQLite.DB, ids)
+    function insert_embedding_hnsw!(db::SQLite.DB, node_id::String)
+        df = DBInterface.execute(db, """
+            SELECT M, efConstruction, efSearch, entry_point, max_level
+            FROM $HNSW_CONFIG_TABLE_NAME
+            LIMIT 1
+            """) |> DataFrame
+    
+        if nrow(df) == 0
+            error("HNSW is enabled but the config table is empty.")
+        end
+    
+        M = df[1, :M]
+        efConstruction = df[1, :efConstruction]
+        efSearch = df[1, :efSearch]
+        ep = df[1, :entry_point]
+        ml = df[1, :max_level]
+    
+        new_ep, new_ml = DiskHNSW.insert!(db, node_id; M=M, efConstruction=efConstruction,
+                                          efSearch=efSearch, entry_point=ep, max_level=ml)
+    
+        if new_ep != ep || new_ml != ml
+            DBInterface.execute(db, """
+                UPDATE $HNSW_CONFIG_TABLE_NAME
+                SET entry_point = ?, max_level = ?
+            """, (new_ep, new_ml))
+        end
+    end
+    
+    ann_type = get_ann_type(db)
+    if ann_type == "hnsw"
+        SQLite.transaction(db) do
+            for node_id in ids
+                insert_embedding_hnsw!(db, string(node_id))
+            end
+        end
+    end
+end
+
+
 
 """
 Delete one or more embeddings from the database using their ID(s).
@@ -784,35 +785,6 @@ else
 end
 ```
 """
-function delete_embeddings_ann(db::SQLite.DB, ids)
-    function ann_handle_delete!(db::SQLite.DB, node_id::String, ann_type::String)
-        if ann_type == "hnsw"
-            stmt = "SELECT entry_point, max_level FROM $HNSW_CONFIG_TABLE_NAME LIMIT 1"
-            df = DBInterface.execute(db, stmt) |> DataFrame
-            if nrow(df) == 0
-                return
-            end
-
-            ep_db   = df[1, :entry_point]
-            level_db = df[1, :max_level]
-
-            new_ep, new_ml = DiskHNSW.delete!(db, node_id, ep_db, level_db)
-            stmt = """
-                UPDATE $HNSW_CONFIG_TABLE_NAME
-                SET entry_point = ?, max_level = ?
-                """
-            DBInterface.execute(db, stmt, (new_ep, new_ml))
-        end
-    end
-
-    ann_type = get_ann_type(db)
-    if !isempty(ann_type)
-        for node_id in ids
-            ann_handle_delete!(db, node_id, ann_type)
-        end
-    end
-end
-
 function delete_embeddings(db::SQLite.DB, id_input)
     #a single ID is passed, wrap it in a one-element array
     ids = id_input isa AbstractVector ? map(string, id_input) : [string(id_input)]
@@ -856,7 +828,34 @@ function delete_embeddings(db_path::String, id_input)
     end
 end
 
+function delete_embeddings_ann(db::SQLite.DB, ids)
+    function ann_handle_delete!(db::SQLite.DB, node_id::String, ann_type::String)
+        if ann_type == "hnsw"
+            stmt = "SELECT entry_point, max_level FROM $HNSW_CONFIG_TABLE_NAME LIMIT 1"
+            df = DBInterface.execute(db, stmt) |> DataFrame
+            if nrow(df) == 0
+                return
+            end
 
+            ep_db   = df[1, :entry_point]
+            level_db = df[1, :max_level]
+
+            new_ep, new_ml = DiskHNSW.delete!(db, node_id, ep_db, level_db)
+            stmt = """
+                UPDATE $HNSW_CONFIG_TABLE_NAME
+                SET entry_point = ?, max_level = ?
+                """
+            DBInterface.execute(db, stmt, (new_ep, new_ml))
+        end
+    end
+
+    ann_type = get_ann_type(db)
+    if !isempty(ann_type)
+        for node_id in ids
+            ann_handle_delete!(db, node_id, ann_type)
+        end
+    end
+end
 
 
 
@@ -966,6 +965,8 @@ function update_embeddings(db::SQLite.DB, id_input, new_embedding_input)
         end
     end
 
+    updatet_embeddings_ann(db, ids)
+
     return true
 end
 
@@ -985,7 +986,13 @@ function update_embeddings(db_path::String, id_input, new_embedding_input)
 end
 
 
-
+function update_embeddings_ann(db::SQLite.DB, ids)
+    ann_type = get_ann_type(db)
+    if ann_type == "hnsw"
+        delete_embeddings_ann(db, ids)
+        insert_embeddings_ann(db, ids)
+    end
+end
 
 
 
