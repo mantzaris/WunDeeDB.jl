@@ -63,6 +63,8 @@ end
     @test occursin("Unsupported data_type", result3)
 
     #clean up test databases after testing
+    close_db()
+
     for db_file in (TEST_DB, TEST_DB2, TEST_DB3)
         if isfile(db_file)
             rm(db_file)
@@ -152,6 +154,9 @@ end
     @test result3 === true
     @test WunDeeDB.DB_HANDLE[] === nothing
     @test !isfile(temp_db2)
+
+    close_db()
+
 end
 
 
@@ -190,6 +195,7 @@ end
     @test res_delete_empty === true
 
     #remove the test database (and any temporary SQLite files like -shm, -wal)
+    close_db()
     for f in readdir(".")
         if startswith(f, "temp_delete_all_embeddings")
             rm(f; force=true)
@@ -455,6 +461,8 @@ end
     @test occursin("Invalid type for new_embedding_input", err_msg2)
 
     #clean up: remove the test files
+    close_db()
+
     for f in readdir(".")
         if startswith(f, "temp_update_embeddings")
             rm(f; force=true)
@@ -466,6 +474,7 @@ end
 
 
 @testset "get_embeddings tests" begin
+
     # Clean up pre-existing test files
     local TEST_DB = "temp_get_embeddings.sqlite"
     for f in readdir(".")
@@ -517,6 +526,8 @@ end
     @test true !== get_embeddings(TEST_DB, String[])
 
     # Clean up
+    close_db()
+
     for f in readdir(".")
         if startswith(f, "temp_get_embeddings")
             rm(f; force=true)
@@ -530,30 +541,28 @@ end
 
 
 @testset "random_embeddings tests" begin
-    #
-    # 1. Clean up any existing test files
-    #
-    local TEST_DB = "temp_random_embeddings.sqlite"
+
     for f in readdir(".")
-        if startswith(f, "temp_random_embeddings")
+        if startswith(f, "temp_")
             rm(f; force=true)
         end
     end
 
-    
+    local TEST_DB = "temp_random_embeddings.sqlite"
 
-    res_init = initialize_db(TEST_DB, 3, "Float32", description="random test", keep_conn_open=false)
+    res_init = initialize_db(TEST_DB, 3, "Float32",
+                             description="test embeddings",
+                             keep_conn_open=false)
     @test res_init === true
 
-
-    # 3. Insert some sample embeddings
+   
     emb_ids = ["id$(i)" for i in 1:5]  # 5 distinct IDs
     emb_values = [
-        Float32[0.1f0, 0.2f0, 0.3f0],
-        Float32[1.0f0, 2.0f0, 3.0f0],
-        Float32[0.5f0, 0.5f0, 0.5f0],
-        Float32[3.14f0, 1.59f0, 2.65f0],
-        Float32[9.99f0, 9.88f0, 9.77f0]
+        Float32[0.1, 0.2, 0.3],
+        Float32[1.0, 2.0, 3.0],
+        Float32[0.5, 0.5, 0.5],
+        Float32[3.1, 1.59, 2.65],
+        Float32[9.99, 9.88, 9.77]
     ]
 
     for (i, id) in enumerate(emb_ids)
@@ -561,55 +570,39 @@ end
         @test res_ins === true
     end
 
-    # # 4. Test A: Simple random selection within valid range
-    # #    e.g., request 2 random embeddings out of the 5
-    # rand_res_2 = random_embeddings(TEST_DB, 2)
-    # # We expect a Dict{String,Any} with 2 distinct keys
-    # @test length(rand_res_2) == 2
-    # @test all(in(emb_ids), keys(rand_res_2))  # the selected IDs should be among the 5
+    rand_res_2 = random_embeddings(TEST_DB, 2)
+    @test length(rand_res_2) == 2
+    @test all(in(emb_ids), keys(rand_res_2))  
 
-    # # There's no strict guarantee which IDs we get (because it's random),
-    # # but we can check the dictionary keys are a subset of the set of inserted IDs.
-    # # Also verify each vector has length 3
-    # for (id_key, vec) in rand_res_2
-    #     @test haskey(rand_res_2, id_key)  # trivially true, but for demonstration
-    #     @test length(vec) == 3
-    # end
+    for (id_key, vec) in rand_res_2
+        @test haskey(rand_res_2, id_key)  # 
+        @test length(vec) == 3
+    end
 
-    # #
-    # # 5. Test B: num > total number of rows
-    # #    e.g., request 10 from a table that only has 5
-    # #
-    # rand_res_10 = random_embeddings(TEST_DB, 10)
-    # @test length(rand_res_10) <= 5  # SQLite returns at most 5
-    # for (id_key, vec) in rand_res_10
-    #     @test id_key in emb_ids
-    #     @test length(vec) == 3
-    # end
 
-    # #
-    # # 6. Test C: num = 0
-    # #    Typically returns an empty dictionary, but let's see what your code does
-    # #
-    # rand_res_0 = random_embeddings(TEST_DB, 0)
-    # @test length(rand_res_0) == 0  # no rows expected
+    rand_res_10 = random_embeddings(TEST_DB, 10)
+    @test length(rand_res_10) <= 5  # SQLite returns at most 5
+    for (id_key, vec) in rand_res_10
+        @test id_key in emb_ids
+        @test length(vec) == 3
+    end
 
-    # #
-    # # 7. Test D: Negative num
-    # #    If you want to allow it, you'll get zero rows. If you want to disallow it, you might throw an error.
-    # #    Suppose your code does not handle it specifically, so we expect 0 rows or an error.
-    # #
-    # rand_res_neg = random_embeddings(TEST_DB, -1)
-    # @test rand_res_neg !== true  # or handle error if your function does so
+
+    rand_res_0 = random_embeddings(TEST_DB, 0)
+    @test length(rand_res_0) == 0  # no rows expected
+
+
+    rand_res_neg = random_embeddings(TEST_DB, -1)
+    @test rand_res_neg !== true  # or handle error if your function does so
     
-    # #
-    # # 8. Clean up
-    # #
-    # for f in readdir(".")
-    #     if startswith(f, "temp_random_embeddings")
-    #         rm(f; force=true)
-    #     end
-    # end
+    # # Clean up
+    close_db()
+
+    for f in readdir(".")
+        if startswith(f, "temp_")
+            rm(f; force=true)
+        end
+    end
 end
 
 
@@ -679,6 +672,8 @@ end
     @test true !== get_adjacent_id(TEST_DB, "alpha"; direction="invalid_dir")
 
     #clean up
+    close_db()
+
     for f in readdir(".")
         if startswith(f, "temp_get_adjacent_id")
             rm(f; force=true)
@@ -757,6 +752,8 @@ end
     @test df_meta_final[1, :embedding_count] == 3
 
     #clean up
+    close_db()
+
     for f in readdir(".")
         if startswith(f, "temp_count_entries")
             rm(f; force=true)
@@ -811,6 +808,8 @@ end
     err_msg = delete_embeddings(TEST_DB, String[])
     @test err_msg !== true
     
+    close_db()
+
     for f in readdir(".")
         if startswith(f, "temp_delete_")
             rm(f; force=true)
