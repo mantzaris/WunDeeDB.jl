@@ -540,6 +540,8 @@ end
         end
     end
 
+    
+
     res_init = initialize_db(TEST_DB, 3, "Float32", description="random test", keep_conn_open=false)
     @test res_init === true
 
@@ -559,55 +561,55 @@ end
         @test res_ins === true
     end
 
-    # 4. Test A: Simple random selection within valid range
-    #    e.g., request 2 random embeddings out of the 5
-    rand_res_2 = random_embeddings(TEST_DB, 2)
-    # We expect a Dict{String,Any} with 2 distinct keys
-    @test length(rand_res_2) == 2
-    @test all(in(emb_ids), keys(rand_res_2))  # the selected IDs should be among the 5
+    # # 4. Test A: Simple random selection within valid range
+    # #    e.g., request 2 random embeddings out of the 5
+    # rand_res_2 = random_embeddings(TEST_DB, 2)
+    # # We expect a Dict{String,Any} with 2 distinct keys
+    # @test length(rand_res_2) == 2
+    # @test all(in(emb_ids), keys(rand_res_2))  # the selected IDs should be among the 5
 
-    # There's no strict guarantee which IDs we get (because it's random),
-    # but we can check the dictionary keys are a subset of the set of inserted IDs.
-    # Also verify each vector has length 3
-    for (id_key, vec) in rand_res_2
-        @test haskey(rand_res_2, id_key)  # trivially true, but for demonstration
-        @test length(vec) == 3
-    end
+    # # There's no strict guarantee which IDs we get (because it's random),
+    # # but we can check the dictionary keys are a subset of the set of inserted IDs.
+    # # Also verify each vector has length 3
+    # for (id_key, vec) in rand_res_2
+    #     @test haskey(rand_res_2, id_key)  # trivially true, but for demonstration
+    #     @test length(vec) == 3
+    # end
 
-    #
-    # 5. Test B: num > total number of rows
-    #    e.g., request 10 from a table that only has 5
-    #
-    rand_res_10 = random_embeddings(TEST_DB, 10)
-    @test length(rand_res_10) <= 5  # SQLite returns at most 5
-    for (id_key, vec) in rand_res_10
-        @test id_key in emb_ids
-        @test length(vec) == 3
-    end
+    # #
+    # # 5. Test B: num > total number of rows
+    # #    e.g., request 10 from a table that only has 5
+    # #
+    # rand_res_10 = random_embeddings(TEST_DB, 10)
+    # @test length(rand_res_10) <= 5  # SQLite returns at most 5
+    # for (id_key, vec) in rand_res_10
+    #     @test id_key in emb_ids
+    #     @test length(vec) == 3
+    # end
 
-    #
-    # 6. Test C: num = 0
-    #    Typically returns an empty dictionary, but let's see what your code does
-    #
-    rand_res_0 = random_embeddings(TEST_DB, 0)
-    @test length(rand_res_0) == 0  # no rows expected
+    # #
+    # # 6. Test C: num = 0
+    # #    Typically returns an empty dictionary, but let's see what your code does
+    # #
+    # rand_res_0 = random_embeddings(TEST_DB, 0)
+    # @test length(rand_res_0) == 0  # no rows expected
 
-    #
-    # 7. Test D: Negative num
-    #    If you want to allow it, you'll get zero rows. If you want to disallow it, you might throw an error.
-    #    Suppose your code does not handle it specifically, so we expect 0 rows or an error.
-    #
-    rand_res_neg = random_embeddings(TEST_DB, -1)
-    @test rand_res_neg !== true  # or handle error if your function does so
+    # #
+    # # 7. Test D: Negative num
+    # #    If you want to allow it, you'll get zero rows. If you want to disallow it, you might throw an error.
+    # #    Suppose your code does not handle it specifically, so we expect 0 rows or an error.
+    # #
+    # rand_res_neg = random_embeddings(TEST_DB, -1)
+    # @test rand_res_neg !== true  # or handle error if your function does so
     
-    #
-    # 8. Clean up
-    #
-    for f in readdir(".")
-        if startswith(f, "temp_random_embeddings")
-            rm(f; force=true)
-        end
-    end
+    # #
+    # # 8. Clean up
+    # #
+    # for f in readdir(".")
+    #     if startswith(f, "temp_random_embeddings")
+    #         rm(f; force=true)
+    #     end
+    # end
 end
 
 

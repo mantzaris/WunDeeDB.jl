@@ -190,8 +190,6 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
     db = open_db(db_path)
     
     try
-        SQLite.execute(db, "PRAGMA journal_mode = WAL;")
-        SQLite.execute(db, "PRAGMA synchronous = NORMAL;")
 
         SQLite.transaction(db) do
             SQLite.execute(db, CREATE_MAIN_TABLE_STMT)
@@ -207,7 +205,7 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
             if length(ann) > 0
                 if ann == "hnsw"
                     SQLite.execute(db, CREATE_DISK_HNSW_TABLE_STMT)
-                    SQLite.execute(CREATE_HNSW_CONFIG_TABLE_STMT)
+                    SQLite.execute(db, CREATE_HNSW_CONFIG_TABLE_STMT)
                     df = DBInterface.execute(db, "SELECT * FROM $(HNSW_CONFIG_TABLE_NAME)") |> DataFrame
 
                     if isempty(df)
@@ -736,11 +734,11 @@ function insert_embeddings_ann(db::SQLite.DB, ids)
     
     ann_type = get_ann_type(db)
     if ann_type == "hnsw"
-        SQLite.transaction(db) do
+        # SQLite.transaction(db) do
             for node_id in ids
                 insert_embedding_hnsw!(db, string(node_id))
             end
-        end
+        # end
     end
 end
 
@@ -841,7 +839,7 @@ function delete_embeddings_ann(db::SQLite.DB, ids)
             ep_db   = df[1, :entry_point]
             level_db = df[1, :max_level]
 
-            new_ep, new_ml = DiskHNSW.delete!(db, node_id, ep_db, level_db)
+            new_ep, new_ml = DiskHNSW.delete!(db, node_id; entry_point=ep_db, max_level=level_db)
             stmt = """
                 UPDATE $HNSW_CONFIG_TABLE_NAME
                 SET entry_point = ?, max_level = ?
@@ -1059,7 +1057,8 @@ function get_embeddings(db::SQLite.DB, id_input)
     ids = id_input isa AbstractVector ? id_input : [id_input]
     n = length(ids)
     if n == 0
-        error("No IDs provided for retrieval.")
+        return Dict{String, Any}()
+        # error("No IDs provided for retrieval.")
     end
 
     #build the query using an IN clause with comma-separated placeholders
@@ -1504,7 +1503,7 @@ function search_ann(db_path::String, query_embedding::AbstractVector, metric::St
         ep = config_df[1, :entry_point]
         ml = config_df[1, :max_level]
 
-        results = search(db, query_embedding, top_k; efSearch=efS, entry_point=ep, max_level=ml)
+        results = DiskHNSW.search(db, query_embedding, top_k; efSearch=efS, entry_point=ep, max_level=ml)
     end
 
     return results

@@ -1,10 +1,11 @@
 module DiskHNSW
-
+import ..WunDeeDB
 
 using SQLite
 using DBInterface
 using DataFrames
 using JSON
+using DataStructures
 using DataStructures: PriorityQueue
 
 
@@ -24,8 +25,10 @@ function get_neighbors(db::SQLite.DB, node_id::String)::Dict{Int,Vector{String}}
     for row in eachrow(df)
         layer::Int = row.layer
         neighbors_json::String = row.neighbors
-        neighbors_array = JSON.parse(neighbors_json)::Vector{String}
-        neighbors_dict[layer] = neighbors_array
+
+        neighbors_array_any = JSON.parse(neighbors_json)
+        neighbors_array_str = map(string, neighbors_array_any)
+        neighbors_dict[layer] = neighbors_array_str
     end
 
     return neighbors_dict
@@ -56,12 +59,12 @@ end
 
 function greedy_search_at_level(
     db::SQLite.DB,
-    query_vec::Vector{Float64},
+    query_vec::AbstractVector,
     start_id::String,
     level::Int
 )::String
     #embed of the start node
-    embed_map = get_embeddings(db, [start_id])
+    embed_map = WunDeeDB.get_embeddings(db, [start_id])
     current_vec = embed_map[start_id]
     current_dist = WunDeeDB.compute_distance(query_vec, current_vec, "euclidean") #euclidean_distance(query_vec, current_vec)
     current_node_id = start_id
@@ -77,7 +80,7 @@ function greedy_search_at_level(
         end
 
         nbrs = neighbors_dict[level]
-        nbr_embed_map = get_embeddings(db, nbrs)
+        nbr_embed_map = WunDeeDB.get_embeddings(db, nbrs)
 
         for nbr in nbrs
             d = WunDeeDB.compute_distance(query_vec, nbr_embed_map[nbr], "euclidean") #euclidean_distance(query_vec, nbr_embed_map[nbr])
@@ -121,7 +124,7 @@ end
 
 function search_layer_with_ef(
     db::SQLite.DB,
-    query_vec::Vector{Float64},
+    query_vec::AbstractVector,
     start_id::String,
     level::Int,
     ef::Int
@@ -130,7 +133,7 @@ function search_layer_with_ef(
     visited = Set{String}()
 
     #start embedding
-    embed_map = get_embeddings(db, [start_id])
+    embed_map = WunDeeDB.get_embeddings(db, [start_id])
     start_vec = embed_map[start_id]
     start_dist = WunDeeDB.compute_distance(query_vec, start_vec, "euclidean") #euclidean_distance(query_vec, start_vec)
     candidate_queue[start_id] = start_dist
@@ -149,14 +152,19 @@ function search_layer_with_ef(
             end
         end
 
-        pop!(candidate_queue) #or dequeue!
+        DataStructures.dequeue!(candidate_queue) #was pop!
 
         neighbors_dict = get_neighbors(db, current_id)
         if !haskey(neighbors_dict, level)
             continue
         end
+        
         neighbors_list = neighbors_dict[level]
-        nbr_embed_map = get_embeddings(db, neighbors_list)
+        if isempty(neighbors_list)
+            continue  # skip the BFS or embedding retrieval
+        end
+
+        nbr_embed_map = WunDeeDB.get_embeddings(db, neighbors_list)
 
         for nbr in neighbors_list
             if nbr in visited
@@ -187,14 +195,14 @@ end
 
 function prune_neighbors(
     db::SQLite.DB,
-    new_vec::Vector{Float64},
+    new_vec::AbstractVector,
     candidate_ids::Vector{String},
     M::Int
 )::Vector{String}
     if isempty(candidate_ids)
         return String[]
     end
-    embed_map = get_embeddings(db, candidate_ids)
+    embed_map = WunDeeDB.get_embeddings(db, candidate_ids)
     #dists = [(cid, euclidean_distance(new_vec, embed_map[cid])) for cid in candidate_ids]
     dists = [(cid, WunDeeDB.compute_distance(new_vec, embed_map[cid], "euclidean")) for cid in candidate_ids]
     sorted_cands = sort(dists, by=x->x[2])
@@ -215,7 +223,7 @@ function prune_neighbor_list!(
         return
     end
 
-    embed_map = get_embeddings(db, [node_id; current_neighbors])
+    embed_map = WunDeeDB.get_embeddings(db, [node_id; current_neighbors])
     node_vec = embed_map[node_id]
 
     # dist_list = [(nbr, euclidean_distance(node_vec, embed_map[nbr])) for nbr in current_neighbors]
@@ -252,7 +260,7 @@ function insert!(
     max_level::Int=0
 )::Tuple{String, Int}
 
-    embed_map = get_embeddings(db, [node_id])
+    embed_map = WunDeeDB.get_embeddings(db, [node_id])
     if !haskey(embed_map, node_id)
         error("No embedding found for node '$node_id'.")
     end
@@ -319,7 +327,7 @@ end
 
 function search(
     db::SQLite.DB,
-    query_vec::Vector{Float64},
+    query_vec::AbstractVector,
     k::Int;
     efSearch::Int=50,
     entry_point::String="",
@@ -339,7 +347,7 @@ function search(
         return String[]
     end
 
-    embed_map = get_embeddings(db, candidates)
+    embed_map = WunDeeDB.get_embeddings(db, candidates)
     
     # dist_pairs = [(c, euclidean_distance(query_vec, embed_map[c])) for c in candidates]
     dist_pairs = [(nbr, WunDeeDB.compute_distance(node_vec, embed_map[nbr], "euclidean")) for nbr in current_neighbors]
