@@ -181,7 +181,7 @@ function search_layer_with_ef(
 
                 worst_id, worst_dist = find_worst_id_dist(top_candidates)
                 if d_nbr < worst_dist
-                    delete!(top_candidates, worst_id)
+                    DataStructures.delete!(top_candidates, worst_id)
                     top_candidates[nbr] = d_nbr
                     candidate_queue[nbr] = d_nbr
                 end
