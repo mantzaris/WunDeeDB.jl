@@ -4,6 +4,7 @@ using SQLite
 using DataFrames
 using DBInterface, Tables
 using DataStructures 
+using Random
 
 
 include("diskhnsw_tests.jl")
