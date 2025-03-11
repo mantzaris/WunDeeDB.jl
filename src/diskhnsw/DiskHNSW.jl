@@ -350,7 +350,7 @@ function search(
     embed_map = WunDeeDB.get_embeddings(db, candidates)
     
     # dist_pairs = [(c, euclidean_distance(query_vec, embed_map[c])) for c in candidates]
-    dist_pairs = [(nbr, WunDeeDB.compute_distance(node_vec, embed_map[nbr], "euclidean")) for nbr in current_neighbors]
+    dist_pairs = [(nbr, WunDeeDB.compute_distance(query_vec, embed_map[nbr], "euclidean")) for nbr in candidates]
 
     dist_sorted = sort(dist_pairs, by=x->x[2])
     best_k = first(dist_sorted, min(k, length(dist_sorted)))

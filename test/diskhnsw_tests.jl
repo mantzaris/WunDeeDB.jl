@@ -8,45 +8,50 @@ end
 
 
 
-@testset "DiskHNSW Basic Tests (Automatic Insertion)" begin
-    local TEST_DB = "temp_diskhnsw_test.sqlite"
-    # Clean up any existing file
-    if isfile(TEST_DB)
-        rm(TEST_DB; force=true)
+
+@testset "DiskHNSW Basic Tests" begin
+    local TEST_DB = "temp_diskhnsw_integration.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_diskhnsw_integration")
+            rm(f; force=true)
+        end
     end
 
-    # 1) Initialize the DB with ann="hnsw"
-    #    This creates the HNSW index/config tables and inserts defaults if empty.
-    res_init = initialize_db(TEST_DB, 3, "Float32"; ann="hnsw", keep_conn_open=true)
-    @test res_init === true
+    local init_res = initialize_db(TEST_DB, 3, "Float32"; keep_conn_open=true, description="DiskHNSW test DB", ann="hnsw")
+    @test init_res === true
 
-    # 2) Open a persistent connection
-    db = open_db(TEST_DB, keep_conn_open=true)
-
-#     # 3) Insert some embeddings => automatically also inserted into HNSW
     local emb1 = Float32[0.1, 0.2, 0.3]
     local emb2 = Float32[0.9, 0.8, 0.7]
 
-    @test insert_embeddings(db, "node1", emb1) === true
-    @test insert_embeddings(db, "node2", emb2) === true
-    # # Because ann="hnsw", your code automatically calls DiskHNSW.insert! behind the scenes.
+    local ins1 = insert_embeddings(TEST_DB, "node1", emb1)
+    @test ins1 === true
 
-    # # 4) Search for the node(s)
-    # local query = Float32[0.05, 0.15, 0.25]
-    # local results = search_ann(TEST_DB, query, "euclidean"; top_k=2)
-    # @test length(results) > 0
-    # @test "node1" in results
+    local ins2 = insert_embeddings(TEST_DB, "node2", emb2)
+    @test ins2 === true
 
-    # # 5) Delete node1 => the HNSW index is also updated automatically
-    # delete_embeddings(db, "node1")
+    local db = open_db(TEST_DB, keep_conn_open=true)
 
-    # # 6) Repeat the same search => node1 should no longer appear
-    # local results2 = search_ann(TEST_DB, query, "euclidean"; top_k=2)
-    # @test !("node1" in results2)
+    # M=4, efConstruction=20 just as an example
+    local ep, ml = WunDeeDB.DiskHNSW.insert!(db, "node1"; M=4, efConstruction=20, efSearch=50, entry_point="", max_level=0)
+    @test ep == "node1"  
+    @test ml >= 0
 
-    # # 7) Clean up: close DB, remove file
+    # Insert the second node. Now we pass the existing ep, ml
+    local new_ep, new_ml = WunDeeDB.DiskHNSW.insert!(db, "node2"; M=4, efConstruction=20, efSearch=50, entry_point=ep, max_level=ml)
+    @test new_ep !== ""  # might remain "node1" or change to "node2" if the second node has a higher level
+
+    local query_vec = Float32[1.0, 2.0, 3.0]
+    local results = WunDeeDB.DiskHNSW.search(db, query_vec, 2; efSearch=50, entry_point=new_ep, max_level=new_ml)
+    @test length(results) > 0
+    @test "node2" in results   # node2 should appear if it's the nearest
+
+    # 6) Optionally test 'delete!' logic
+    local del_ep, del_ml = WunDeeDB.DiskHNSW.delete!(db, "node1"; entry_point=new_ep, max_level=new_ml)
+
+    local results2 = WunDeeDB.DiskHNSW.search(db, query_vec, 2; efSearch=50, entry_point=del_ep, max_level=del_ml)
+    @test "node1" ∉ results2
+
     close_db(db)
-    if isfile(TEST_DB)
-        rm(TEST_DB; force=true)
-    end
+    rm(TEST_DB; force=true)  # remove if you want a fully ephemeral test
 end
+
