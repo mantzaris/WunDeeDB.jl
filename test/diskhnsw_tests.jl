@@ -208,3 +208,202 @@ end
     close_db(db)
     rm(TEST_DB; force=true)
 end
+
+
+
+
+
+@testset "WunDeeDB + HNSW Integration Tests" begin
+
+    local TEST_DB = "temp_wundb_hnsw_integration.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_wundb_hnsw_integration")
+            rm(f; force=true)
+        end
+    end
+
+    local HNSW_CONFIG_TABLE_NAME = "HNSWConfig"
+
+    local init_res = initialize_db(TEST_DB, 3, "Float32"; ann="hnsw", keep_conn_open=true)
+    @test init_res === true
+
+    #automatically calls DiskHNSW.insert! under the hood
+    local emb1 = Float32[0.1, 0.2, 0.3]
+    local emb2 = Float32[0.9, 0.8, 0.7]
+
+    local ins1 = insert_embeddings(TEST_DB, "auto_node1", emb1)
+    @test ins1 === true
+
+    local ins2 = insert_embeddings(TEST_DB, "auto_node2", emb2)
+    @test ins2 === true
+
+    #see that the HNSW config table is not empty:
+    local db = open_db(TEST_DB, keep_conn_open=true)
+    local cfg_df = DBInterface.execute(db, """
+        SELECT * FROM $HNSW_CONFIG_TABLE_NAME
+        """) |> DataFrame
+    @test nrow(cfg_df) == 1  #expect exactly one config row
+    @test cfg_df[1, :entry_point] !== ""
+
+    
+    local ep = cfg_df[1, :entry_point]
+    local ml = cfg_df[1, :max_level]
+
+    #WunDeeDB’s search_ann to do a top-k = 2 query near emb2 => should find “auto_node2”
+    local query_vec = Float32[1.0, 2.0, 3.0]
+    local results = search_ann(TEST_DB, query_vec, "euclidean"; top_k=2)
+    @test "auto_node2" in results
+    
+    
+    local emb3 = Float32[0.05, 0.15, 0.25]
+    local ins3 = insert_embeddings(TEST_DB, "auto_node3", emb3)
+    @test ins3 === true
+    
+    #search for a vector near "auto_node3"
+    local q2 = Float32[0.07, 0.10, 0.30]
+    local results2 = search_ann(TEST_DB, q2, "euclidean"; top_k=2)
+    @test "auto_node3" in results2
+    
+    
+    local del_res = delete_embeddings(TEST_DB, "auto_node2")
+    @test del_res === true
+    
+    #searching near emb2 => auto_node2 shouldn’t appear
+    local results3 = search_ann(TEST_DB, query_vec, "euclidean"; top_k=2)
+    @test !("auto_node2" in results3)
+    
+    close_db(db)
+    rm(TEST_DB; force=true)
+end
+
+
+
+
+
+@testset "WunDeeDB + HNSW Large-Dimensional Test" begin
+    #remove any older DB or leftover WAL/SHM
+    local TEST_DB = "temp_wundb_hnsw_dim100.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_wundb_hnsw_dim100")
+            rm(f; force=true)
+        end
+    end
+
+    #initialize with dimension=100, ann="hnsw"
+    local dim = 100
+    local init_res = initialize_db(
+        TEST_DB,
+        dim,
+        "Float32";
+        keep_conn_open=true,
+        ann="hnsw",
+        description="High-dim test"
+    )
+    @test init_res == true
+
+    #insert many random nodes
+    local rng = MersenneTwister(12345)
+    local n_nodes = 50
+
+    #create node i -> "node i" with random Float32[dim]
+    local node_ids = [ "node$(i)" for i in 1:n_nodes ]
+    local node_embs = [
+        Float32[ rand(rng) for _ in 1:dim ] for i in 1:n_nodes
+    ]
+
+    #create a “gem” node with embedding [1.0, 0, 0, ... 0]
+    #first value is 1, the rest 0: calling it "gem"
+    local gem_id = "gem"
+    local gem_emb = Float32[1.0; zeros(Float32, dim-1)]
+
+    #insert all nodes
+    for (i, nid) in enumerate(node_ids)
+        local res_ins = insert_embeddings(TEST_DB, nid, node_embs[i])
+        @test res_ins === true
+    end
+
+    #insert the special gem node
+    local gem_res = insert_embeddings(TEST_DB, gem_id, gem_emb)
+    @test gem_res === true
+
+    #calls to insert_embeddings if ann="hnsw" is set means the index is auto-updated. no direct DiskHNSW calls needed
+
+    #do a query near [0.9, 0, 0, ..., 0], expect "gem" is the best or among top if top_k>1
+    local test_query = Float32[0.9; zeros(Float32, dim-1)]  # close to gem_emb
+    local top_k = 3
+    local results = search_ann(TEST_DB, test_query, "euclidean"; top_k=top_k)
+
+    @test length(results) <= top_k
+    @test "gem" in results  #should see 'gem' among the top
+    
+    
+    local rand_query = Float32[ rand(rng) for _ in 1:dim ]
+    local r2 = search_ann(TEST_DB, rand_query, "euclidean"; top_k=5)
+    
+    @test length(r2) <= 5
+
+    local db = open_db(TEST_DB, keep_conn_open=true)
+    close_db(db)
+    rm(TEST_DB; force=true)
+end
+
+
+
+
+
+@testset "WunDeeDB + HNSW Large Scale + Multi-Level Stress" begin
+    local TEST_DB = "temp_diskhnsw_multilevel.sqlite"
+    for f in readdir(".")
+        if startswith(f, "temp_diskhnsw_multilevel")
+            rm(f; force=true)
+        end
+    end
+
+    local dim = 128
+    local init_res = initialize_db(TEST_DB, dim, "Float32"; keep_conn_open=true, ann="hnsw",
+                                   description="Large scale multi-level test")
+    @test init_res == true
+
+    local rng = MersenneTwister(98765)
+    local n_nodes = 300
+    local node_ids = [ "node$i" for i in 1:n_nodes ]
+    local node_embs = [
+        Float32[ rand(rng) for _ in 1:dim ] for _ in 1:n_nodes
+    ]
+
+    #Insert. ann="hnsw", each insertion triggers DiskHNSW insertion
+    for (i, nid) in enumerate(node_ids)
+        local ins_res = insert_embeddings(TEST_DB, nid, node_embs[i])
+        @test ins_res === true
+    end
+
+    #check HNSW config
+    local HNSW_CONFIG_TABLE_NAME = "HNSWConfig"
+
+    local db = open_db(TEST_DB, keep_conn_open=true)
+    local config_df = DBInterface.execute(db, """
+        SELECT * 
+        FROM $HNSW_CONFIG_TABLE_NAME
+        LIMIT 1
+    """) |> DataFrame
+    @test nrow(config_df) == 1
+    local ep = config_df[1, :entry_point]
+    local ml = config_df[1, :max_level]
+
+    #small “sample check” that the BFS expansions work: for example, pick 5 random query vectors
+    for _ in 1:5
+        local query_vec = Float32[ rand(rng) for _ in 1:dim ]
+        local top_k = rand(1:10)
+        local results = search_ann(TEST_DB, query_vec, "euclidean"; top_k=top_k)
+        @test length(results) <= top_k
+    end
+
+    #check if the max_level from config is > 1 or 2
+    #confirm some nodes ended up with higher levels:
+    @test ml >= 1  #possibly 2 or 3 if your distribution is somewhat geometric
+
+    
+    close_db(db)
+    rm(TEST_DB; force=true)
+end
+
