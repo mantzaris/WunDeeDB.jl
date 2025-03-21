@@ -11,7 +11,8 @@ include("linear/linear.jl")
 include("distance_metrics/distance_metrics.jl")
 
 include("diskhnsw/DiskHNSW.jl")
-using .DiskHNSW
+include("lmdiskann/LMDiskANN.jl")
+using .DiskHNSW, .LMDiskANN
 
 export get_supported_data_types,
         initialize_db, open_db, close_db, delete_db, delete_all_embeddings,
@@ -31,11 +32,6 @@ export supported_distance_metrics #from: distance_metrics/distance_metrics.jl
 export linear_search_iteration, linear_search_ids, linear_search_ids_batched, linear_search_all_embeddings #from: linear/linear.jl
 export search_ann
 
-###################
-#TODO:
-#linear exact search for Retrieval (brute force)
-#IVF, HSNW
-###################
 
 const DB_HANDLE = Ref{Union{SQLite.DB, Nothing}}(nothing) #handle for the db connection to use instead of open/close fast
 const KEEP_DB_OPEN = Ref{Bool}(true) #keep open or not the db connection after use
@@ -111,6 +107,7 @@ const INSERT_EMBEDDING_STMT = "INSERT INTO $MAIN_TABLE_NAME (id_text, embedding_
 
 
 #optional ANN table schemas
+#HNSW
 const HNSW_INDEX_TABLE_NAME = "HNSWIndex"
 const HNSW_CONFIG_TABLE_NAME = "HNSWConfig"
 
@@ -137,8 +134,28 @@ const META_HNSW_INSERT_CONFIG_STMT = """
         VALUES (?, ?, ?, ?, ?)
         """
 
+#LM-DiskANN
+const LM_DISKANN_CONFIG_TABLE_NAME = "LMDiskANNConfig"
+const LM_DISKANN_INDEX_TABLE_NAME = "LMDiskANNIndex"
 
+const CREATE_LM_DISKANN_CONFIG_TABLE_STMT = """
+    CREATE TABLE IF NOT EXISTS $LM_DISKANN_CONFIG_TABLE_NAME (
+        entrypoint  TEXT
+    );
+"""
 
+const CREATE_LM_DISKANN_INDEX_TABLE_STMT = """
+    CREATE TABLE IF NOT EXISTS $LM_DISKANN_INDEX_TABLE_NAME (
+        id_text   TEXT NOT NULL,
+        neighbors TEXT NOT NULL,
+        PRIMARY KEY (id_text)
+    );
+"""
+
+const INSERT_LM_DISKANN_CONFIG_STMT = """
+    INSERT OR REPLACE INTO $(WunDeeDB.LM_DISKANN_CONFIG_TABLE_NAME) (entrypoint)
+    VALUES (?);
+"""
 
 
 
@@ -152,7 +169,7 @@ Initialize a SQLite database by setting up the main and meta tables with appropr
 - `data_type::String`: Data type for the embeddings. Must be one of the supported types (use `get_supported_data_types()` to see valid options).
 - `description::String=""`: (optional) User selected description meta data, defaults to empty string
 - `keep_conn_open::Bool=true`: (optional) Keep the DB connection open for rapid successive uses or false for multiple applications to release
-
+- `ann`: optional for the type of ann to use ['hnsw','lmdiskann'] if none is provided it is brute force linear search
 # Returns
 - `true` on successful initialization.
 - A `String` error message if any parameter is invalid or if an exception occurs during initialization.
@@ -212,7 +229,17 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
                         SQLite.execute(db, META_HNSW_INSERT_CONFIG_STMT, (30, 300, 100, "", 0))
                     end
                 end
-                
+
+                if ann == "lmdiskann"
+                    SQLite.execute(db, CREATE_LM_DISKANN_CONFIG_TABLE_STMT)
+                    SQLite.execute(db, CREATE_LM_DISKANN_INDEX_TABLE_STMT)
+
+                    df = DBInterface.execute(db, "SELECT * FROM $(LM_DISKANN_CONFIG_TABLE_NAME)") |> DataFrame
+
+                    if isempty(df)
+                        SQLite.execute(db, INSERT_LM_DISKANN_CONFIG_STMT, (""))
+                    end
+                end                
             end
 
         end
@@ -415,6 +442,14 @@ function delete_all_embeddings_ann(db)
         SQLite.execute(db, "DELETE FROM $HNSW_CONFIG_TABLE_NAME")
         SQLite.execute(db, META_HNSW_INSERT_CONFIG_STMT, (30, 300, 100, "", 0))
     end
+
+    if ann_type == "lmdiskann"
+        stmt = "DELETE FROM $LM_DISKANN_INDEX_TABLE_NAME"
+        SQLite.execute(db, stmt)
+        
+        SQLite.execute(db, "DELETE FROM $LM_DISKANN_CONFIG_TABLE_NAME")
+        SQLite.execute(db, INSERT_LM_DISKANN_CONFIG_STMT, (""))
+    end
 end
 
 function delete_all_embeddings(db_path::String)
@@ -580,6 +615,8 @@ function get_ann_type(db::SQLite.DB)
     
     if ann_val == "hnsw"
         return "hnsw"
+    elseif ann_val == "lmdiskann"
+        return "lmdiskann"
     else
         return ""
     end
@@ -731,7 +768,11 @@ function insert_embeddings_ann(db::SQLite.DB, ids)
             """, (new_ep, new_ml))
         end
     end
-    
+
+    function insert_embedding_lmdiskann!(db::SQLite.DB, node_id::String)
+        LMDiskANN.insert!(db,node_id)
+    end
+
     ann_type = get_ann_type(db)
     if ann_type == "hnsw"
         # SQLite.transaction(db) do
@@ -739,6 +780,11 @@ function insert_embeddings_ann(db::SQLite.DB, ids)
                 insert_embedding_hnsw!(db, string(node_id))
             end
         # end
+    end
+    if ann_type == "lmdiskann"
+        for node_id in ids
+            insert_embedding_lmdiskann!(db, string(node_id))
+        end
     end
 end
 
@@ -803,7 +849,7 @@ function delete_embeddings(db::SQLite.DB, id_input)
         update_meta(db, -n)
     end
 
-    delete_embeddings_ann(db::SQLite.DB, ids)
+    delete_embeddings_ann(db, ids)
 
     return true
 end
@@ -845,6 +891,10 @@ function delete_embeddings_ann(db::SQLite.DB, ids)
                 SET entry_point = ?, max_level = ?
                 """
             DBInterface.execute(db, stmt, (new_ep, new_ml))
+        end
+
+        if ann_type == "lmdiskann"
+            LMDiskANN.delete!(db, node_id)
         end
     end
 
@@ -991,28 +1041,20 @@ function update_embeddings_ann(db::SQLite.DB, ids)
         delete_embeddings_ann(db, ids)
         insert_embeddings_ann(db, ids)
     end
+
+    if ann_type == "lmdiskann"
+        delete_embeddings_ann(db, ids)
+        insert_embeddings_ann(db, ids)
+    end
 end
-
-
-
-
-
-
-
-
-
-
-
 
 
 
 #RETRIEVE
 
 
-
-
 """
-Retrieve one or more embeddings from the SQLite database by their ID(s).
+Retrieve one or more embeddings from the SQLite database by their ID(s)
 
 This function is overloaded to support:
 - `get_embeddings(db::SQLite.DB, id_input)`: Retrieves embeddings using an active database connection.
@@ -1504,6 +1546,11 @@ function search_ann(db_path::String, query_embedding::AbstractVector, metric::St
         ml = config_df[1, :max_level]
 
         results = DiskHNSW.search(db, query_embedding, top_k; efSearch=efS, entry_point=ep, max_level=ml)
+    end
+
+    if ann_type == "lmdiskann"
+        results = LMDiskANN.search(db, query_embedding)
+
     end
 
     return results
