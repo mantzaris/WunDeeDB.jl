@@ -4,7 +4,6 @@ using Documenter
 DocMeta.setdocmeta!(WunDeeDB, :DocTestSetup, :(using WunDeeDB); recursive=true)
 
 makedocs(;
-    modules=[WunDeeDB],
     authors="Alexander V. Mantzaris",
     sitename="WunDeeDB.jl",
     format=Documenter.HTML(;
@@ -19,4 +18,5 @@ makedocs(;
 
 deploydocs(;
     repo="github.com/mantzaris/WunDeeDB.jl",
+    devbranch="main",
 )
