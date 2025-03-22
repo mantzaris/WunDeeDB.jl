@@ -153,7 +153,7 @@ const CREATE_LM_DISKANN_INDEX_TABLE_STMT = """
 """
 
 const INSERT_LM_DISKANN_CONFIG_STMT = """
-    INSERT OR REPLACE INTO $(WunDeeDB.LM_DISKANN_CONFIG_TABLE_NAME) (entrypoint)
+    INSERT OR REPLACE INTO $(LM_DISKANN_CONFIG_TABLE_NAME) (entrypoint)
     VALUES (?);
 """
 
@@ -237,8 +237,9 @@ function initialize_db(db_path::String, embedding_length::Int, data_type::String
                     df = DBInterface.execute(db, "SELECT * FROM $(LM_DISKANN_CONFIG_TABLE_NAME)") |> DataFrame
 
                     if isempty(df)
-                        SQLite.execute(db, INSERT_LM_DISKANN_CONFIG_STMT, (""))
+                        SQLite.execute(db, INSERT_LM_DISKANN_CONFIG_STMT, ("",))
                     end
+
                 end                
             end
 

@@ -56,7 +56,7 @@ const GET_LM_DISKANN_CONFIG_STMT = """
 
 
 function _get_neighbors(db::SQLite.DB, node_id::String)
-    df = SQLite.execute(db, GET_NEIGHBORS_STMT, (node_id,)) |> DataFrame
+    df = DBInterface.execute(db, GET_NEIGHBORS_STMT, (node_id,)) |> DataFrame
 
     if isempty(df)
         return String[]
@@ -69,7 +69,7 @@ function _get_neighbors(db::SQLite.DB, node_id::String)
 end
 
 
-function _set_neighbors(db::SQLite.DB, node_id::String, neighbor_ids::Vector{String})
+function _set_neighbors(db::SQLite.DB, node_id::AbstractString, neighbor_ids::AbstractVector)
     maxd = DEFAULT_MAX_DEGREE
 
     if length(neighbor_ids) > maxd
@@ -181,7 +181,7 @@ function search(db::SQLite.DB, query_vec::AbstractVector; topk::Int=10)
 end
 
 
-function _prune_neighbors(db::SQLite.DB, node_id::String, candidates::Vector{String})
+function _prune_neighbors(db::SQLite.DB, node_id::AbstractString, candidates::AbstractVector)
 
     if length(candidates) <= DEFAULT_MAX_DEGREE
         return candidates
