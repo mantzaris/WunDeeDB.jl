@@ -1550,7 +1550,7 @@ function search_ann(db_path::String, query_embedding::AbstractVector, metric::St
     end
 
     if ann_type == "lmdiskann"
-        results = LMDiskANN.search(db, query_embedding)
+        results = LMDiskANN.search(db, query_embedding; topk=top_k)
 
     end
 
