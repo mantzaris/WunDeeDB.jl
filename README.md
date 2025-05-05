@@ -4,7 +4,7 @@
 [![Documentation](https://img.shields.io/badge/docs-stable-blue.svg)](https://mantzaris.github.io/WunDeeDB.jl/) 
 [![Build Status](https://github.com/mantzaris/WunDeeDB.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mantzaris/WunDeeDB.jl/actions)
 
-# WunDeeDB is a vector DataBase with a SQLite backend
+# WunDeeDB is a vector DataBase with a SQLite backend [link to docs](mantzaris.github.io/WunDeeDB.jl)
 
 
 WunDeeDB is a Julia package for **storing and querying embeddings** in a SQLite database. It supports a variety of numerical types (including `Float16`, `Float32`, `Float64`, and various integer types) and can integrate with approximate nearest neighbor indices (like **HNSW** or **LM‐DiskANN**). By default, the module provides a **linear fallback** for distance queries if no ANN method is enabled.
