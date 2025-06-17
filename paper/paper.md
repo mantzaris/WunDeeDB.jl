@@ -1,5 +1,5 @@
 ---
-title: "WunDeeDB.jl: A easy to use, zero config, WAL, SQLite backend vector database"
+title: "WunDeeDB.jl: An easy to use, zero config, WAL, SQLite backend vector database"
 tags:
   - Julia
   - ANN
