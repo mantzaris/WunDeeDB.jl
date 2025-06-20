@@ -1,7 +1,7 @@
 name = "WunDeeDB"
 uuid = "3b576da0-2f9f-4b64-bd33-cc2f6f73d57a"
 authors = ["Alexander V. Mantzaris"]
-version = "1.0.0-DEV"
+version = "1.0.1"
 
 [deps]
 DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
@@ -18,6 +18,15 @@ Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
 
 [compat]
 julia = "1.6"
+DBInterface = "2"
+DataFrames = "1"
+DataStructures = "0.18"
+Distances = "0.10"
+JSON = "0.21"
+JSON3 = "1"
+SQLite = "1"
+StatsBase = "0.34"
+Tables = "1"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
