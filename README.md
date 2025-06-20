@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE) 
 [![Documentation](https://img.shields.io/badge/docs-stable-blue.svg)](https://mantzaris.github.io/WunDeeDB.jl/) 
 [![Build Status](https://github.com/mantzaris/WunDeeDB.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mantzaris/WunDeeDB.jl/actions)
+[![DOI](https://joss.theoj.org/papers/10.21105/joss.08033/status.svg)](https://doi.org/10.21105/joss.08033)
 
 # WunDeeDB is a vector DataBase with a SQLite backend 
 
@@ -115,7 +116,15 @@ close_db()  # or close_db(db_path) if your code does that
 
 read the documentation for more details on the variety of functions.
 
+
 ### naming of the package
 In his book How JavaScript Works, Douglas Crockford advocates for spelling the word "one" as "wun" to better align with its pronunciation. He argues that the traditional spelling does not conform to standard English pronunciation rules and that having the word for 1 start with a letter resembling 0 is problematic. Since a vector database is a database for 1-D objects, it is called **Wun-Dee-DB**. 
 
 Along with a simple name should be the simple approach for a: zero-config, embedded, WAL, just works vector database.
+
+# Citing this work
+
+- Mantzaris, A. V., (2025). WunDeeDB.jl: An easy to use, zero config, WAL, SQLite backend vector database. Journal of Open Source Software, 10(110), 8033, https://doi.org/10.21105/joss.08033
+
+- @article{Mantzaris2025, doi = {10.21105/joss.08033}, url = {https://doi.org/10.21105/joss.08033}, year = {2025}, publisher = {The Open Journal}, volume = {10}, number = {110}, pages = {8033}, author = {Alexander V. Mantzaris}, title = {WunDeeDB.jl: An easy to use, zero config, WAL, SQLite backend vector database}, journal = {Journal of Open Source Software} } 
+
